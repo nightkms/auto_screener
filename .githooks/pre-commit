@@ -1,0 +1,20 @@
+#!/bin/sh
+# 커밋 전 비밀값/개인정보 스캔. 0이 아니면 커밋 중단.
+# 활성화: git config core.hooksPath .githooks   (클론 후 1회)
+root="$(git rev-parse --show-toplevel)"
+scanner="$root/scripts/check_secrets.py"
+
+if command -v python >/dev/null 2>&1; then
+    py=python
+elif command -v py >/dev/null 2>&1; then
+    py=py
+elif command -v python3 >/dev/null 2>&1; then
+    py=python3
+else
+    echo "pre-commit: python 을 찾을 수 없습니다. 스캔을 건너뜁니다." >&2
+    echo "  (안전을 위해 python 설치 후 다시 커밋하거나, 수동으로 staged 내용을 점검하세요)" >&2
+    exit 1
+fi
+
+"$py" "$scanner"
+exit $?

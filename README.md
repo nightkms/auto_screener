@@ -35,7 +35,23 @@ cd path\to\auto_screener
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
 pip install -r requirements.txt
+
+# 비밀값 유출 방지 pre-commit 훅 활성화 (클론 후 1회)
+git config core.hooksPath .githooks
 ```
+
+### 비밀값 차단 훅
+
+`.githooks/pre-commit` 가 커밋 직전 staged 내용을 스캔해, 비밀값·개인정보가 섞이면
+커밋을 거부합니다 (`scripts/check_secrets.py`). 탐지 대상:
+
+- 로컬 `.env` 의 실제 값이 코드에 그대로 들어간 경우 (하드블록)
+- 토큰/프라이빗키/AWS·GitHub·Slack 키, 일반 `secret=...` 할당
+- 이메일·Windows 사용자 경로 등 개인정보
+- 금지 파일명(`.env`, `*.pem`, `*.key`, `id_rsa` …)
+
+오탐이면 해당 라인 끝에 `# pragma: allowlist secret` 를 붙이면 통과합니다
+(단 `.env` 실값/금지 파일명은 pragma 로도 통과 불가).
 
 ## 필요한 자격 증명
 
