@@ -81,8 +81,20 @@ def _staged_files() -> list[str]:
     return [f for f in out.splitlines() if f.strip()]
 
 
+# .env 항목 중 "진짜 비밀"만 하드블록 대상으로 본다.
+# (CRON/TIMEZONE/PORT/MODEL/LOG_LEVEL 같은 설정값이 코드·문서에 등장하는 오탐 방지)
+SENSITIVE_ENV_KEY = re.compile(
+    r"(KEY|TOKEN|SECRET|PASS(WORD|WD)?|PWD|CREDENTIAL|AUTH|PRIVATE|CHAT_ID|SESSION|COOKIE)",
+    re.IGNORECASE,
+)
+
+
 def _env_secret_values(root: Path) -> list[str]:
-    """로컬 .env 의 실제 값들 (하드블록 대상). 코드에 박지 않고 런타임에 읽음."""
+    """로컬 .env 의 비밀 값들 (하드블록 대상). 코드에 박지 않고 런타임에 읽음.
+
+    포함 기준: 키 이름이 비밀스럽거나(KEY/TOKEN/SECRET…), 값이 길고 공백 없는
+    고엔트로피 토큰(len>=20)일 때만. cron/timezone/port/model 등 설정값은 제외.
+    """
     env = root / ".env"
     vals: list[str] = []
     if not env.exists():
@@ -91,8 +103,13 @@ def _env_secret_values(root: Path) -> list[str]:
         line = line.strip()
         if not line or line.startswith("#") or "=" not in line:
             continue
-        v = line.split("=", 1)[1].strip().strip("\"'")
-        if len(v) >= 6:  # 너무 짧은 값(포트 등)은 오탐 방지로 제외
+        key, raw = line.split("=", 1)
+        v = raw.strip().strip("\"'")
+        if len(v) < 6:  # 짧은 값(포트 등) 제외
+            continue
+        key_sensitive = bool(SENSITIVE_ENV_KEY.search(key))
+        value_secretish = len(v) >= 20 and not re.search(r"\s", v)
+        if key_sensitive or value_secretish:
             vals.append(v)
     return vals
 

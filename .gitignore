@@ -13,7 +13,7 @@ logs/
 .idea/
 .vscode/
 
-# 로컬 실행/진단 보조물 (공개 불필요, 절대경로·환경 의존)
+# 일회성 디버그 스크립트만 제외 (절대경로·환경 의존)
+# 주의: _silence_console.py(scheduler.py가 import) 와 _get_pid.ps1(start_screener.bat 사용)은
+#       클론 후 실행에 필요하므로 추적함.
 _diag*.py
-_get_pid.ps1
-_silence_console.py
