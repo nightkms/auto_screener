@@ -138,7 +138,8 @@ async def queue_add(ticker: str = Form(...), name: str = Form("")):
     if not (ticker.isdigit() and len(ticker) == 6):
         return RedirectResponse(url=f"/?dup={ticker}", status_code=303)
     # 대시보드에서 검색 → 추가하는 경로는 source='manual' (등급 무관 알림)
-    added = storage.add_to_queue(ticker, name=name.strip(), source="manual")
+    added = storage.add_to_queue(ticker, name=name.strip(),
+                                 source="manual", pick_source="manual")
     flash = "queued" if added else "dup"
     return RedirectResponse(
         url=f"/?{flash}={ticker}", status_code=303)

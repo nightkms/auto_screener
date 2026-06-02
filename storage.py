@@ -91,7 +91,8 @@ CREATE TABLE IF NOT EXISTS analysis_queue (
     ticker       TEXT NOT NULL,
     name         TEXT,
     market       TEXT,
-    source       TEXT NOT NULL DEFAULT 'manual',   -- manual/auto_weekly/telegram
+    source       TEXT NOT NULL DEFAULT 'manual',   -- manual/auto_weekly/telegram (알림정책용)
+    pick_source  TEXT,                             -- selector 선정근거: search/upper/quant/z-score/manual
     status       TEXT NOT NULL DEFAULT 'pending',  -- pending/processing/done/failed
     queued_at    TEXT NOT NULL,
     started_at   TEXT,
@@ -164,6 +165,9 @@ def _migrate(c: sqlite3.Connection) -> None:
         c.execute("ALTER TABLE analysis_queue ADD COLUMN source "
                   "TEXT NOT NULL DEFAULT 'manual'")
         log.info("migrate: analysis_queue.source 추가")
+    if "pick_source" not in cols("analysis_queue"):
+        c.execute("ALTER TABLE analysis_queue ADD COLUMN pick_source TEXT")
+        log.info("migrate: analysis_queue.pick_source 추가")
 
     # ticker_state에 last_run_id FK가 살아있으면 (이전 스키마) 테이블 재생성.
     # 이 테이블은 미러 캐시라 데이터 보존 안 해도 무방.
@@ -332,10 +336,11 @@ def candidates_for_run(run_id: int) -> list[dict]:
 # Analysis queue
 # ---------------------------------------------------------------------------
 def add_to_queue(ticker: str, name: str = "", market: str = "",
-                 source: str = "manual") -> bool:
+                 source: str = "manual", pick_source: str = "") -> bool:
     """pending/processing/failed 인 같은 ticker가 이미 있으면 추가하지 않음.
     'failed'까지 막아야 정각 hot pick이 동일 retry 종목을 중복 INSERT하지 않음.
-    source: 'manual' (사용자 수동 추가) / 'auto_weekly' / 'auto_hourly' / 'telegram'."""
+    source: 'manual' (사용자 수동 추가) / 'auto_weekly' / 'auto_hourly' / 'telegram'.
+    pick_source: selector 선정근거 (search/upper/quant/z-score/manual). 화면 표시용."""
     with _connect() as c:
         exists = c.execute(
             "SELECT 1 FROM analysis_queue WHERE ticker=? "
@@ -345,9 +350,10 @@ def add_to_queue(ticker: str, name: str = "", market: str = "",
         if exists:
             return False
         c.execute(
-            """INSERT INTO analysis_queue (ticker, name, market, source, queued_at)
-               VALUES (?, ?, ?, ?, ?)""",
-            (ticker, name, market, source,
+            """INSERT INTO analysis_queue
+                   (ticker, name, market, source, pick_source, queued_at)
+               VALUES (?, ?, ?, ?, ?, ?)""",
+            (ticker, name, market, source, pick_source or None,
              datetime.now().isoformat(timespec="seconds")),
         )
         return True

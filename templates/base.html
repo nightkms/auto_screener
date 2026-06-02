@@ -103,6 +103,16 @@
     .queue-failed     { background: #fde8e8; color: #b91c1c; }
     .queue-retry      { background: #fef3c7; color: #92400e; }  /* attempts>0 강조 */
 
+    /* 선정근거(pick_source) 배지: 검색상위/상한가/거래량급증/일반/수기 */
+    .pick-src { display: inline-block; margin-left: 5px; font-size: 10px;
+                padding: 1px 6px; border-radius: 4px; font-weight: 600;
+                white-space: nowrap; vertical-align: middle; }
+    .pick-search { background: #e6f1ff; color: #1d4ed8; }
+    .pick-upper  { background: #fde8e8; color: #b91c1c; }
+    .pick-quant  { background: #ffedd5; color: #c2410c; }
+    .pick-zscore { background: #eef0f3; color: #4b5563; }
+    .pick-manual { background: #ecfdf5; color: #047857; }
+
     /* 우측 하단 floating 큐 위젯 */
     .queue-floating {
       position: fixed; bottom: 16px; right: 16px; width: 280px;

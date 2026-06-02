@@ -34,6 +34,7 @@ HEADERS = {
 CANDIDATE_POOL_PER_MARKET = 100  # 시장별 시총 상위 N
 SCORE_WEIGHTS = {"return": 0.45, "value_surge": 0.35, "foreign_delta": 0.20}
 LASTSEARCH_TOP_N = 30  # 네이버 검색 상위 페이지에서 가져올 종목 수 (1차 풀)
+MOVERS_TOP_N = 30      # 상한가·거래량 급증 등 시세 리스트에서 가져올 종목 수 (1.5차 보강)
 
 EXCLUDE_NAME_PAT = re.compile(r"(스팩|우선주|리츠|ETN|ETF|TIGER|KODEX|HANARO|RISE|ARIRANG)")
 EXCLUDE_NAME_SUFFIX = re.compile(r"(우|우B|우C|\(전환\))$")
@@ -54,6 +55,7 @@ class Candidate:
     value_surge: float               # 이번 주 평균 거래대금 / 이전 4주 평균
     foreign_delta: float             # 외국인 보유율 5거래일 변화 (%p)
     score: float
+    source_tag: str = ""             # 선정근거: search/upper/quant/z-score/manual
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -103,6 +105,48 @@ async def _fetch_lastsearch_top(session: aiohttp.ClientSession,
     out: list[dict] = []
     seen: set[str] = set()
     for m in _LASTSEARCH_ROW.finditer(html):
+        rank, code, name = m.group(1), m.group(2), m.group(3).strip()
+        if code in seen:
+            continue
+        seen.add(code)
+        out.append({"rank": int(rank), "ticker": code, "name": name})
+        if len(out) >= limit:
+            break
+    return out
+
+
+# ---------------------------------------------------------------------------
+# 시세 리스트 (상한가·거래량 급증 등 finance.naver.com/sise/sise_<kind>.naver)
+# ---------------------------------------------------------------------------
+# 페이지마다 컬럼 구성이 달라 본문 행 마크업은 제각각이지만(상한가는 class="tltle"가
+# 없고 순위와 이름 사이에 number 칸이 더 있음), **순위 데이터 행에는 공통으로
+# <td class="no">순위</td> 셀이 있고** 내비/연관 링크에는 없다. 이 순위셀을 앵커로
+# 잡고 직후의 첫 종목 링크를 본문 종목으로 본다. (검색상위 페이지와 별개 구조)
+_SISE_MOVER_ROW = re.compile(
+    r'class="no"\s*>\s*(\d+)\s*</td>.*?'
+    r'/item/main\.naver\?code=(\d{6})[^>]*>([^<]+)</a>',
+    re.S,
+)
+
+
+async def _fetch_sise_movers(session: aiohttp.ClientSession, kind: str,
+                              limit: int) -> list[dict]:
+    """finance.naver.com/sise/sise_<kind>.naver 상위 limit개. {rank,ticker,name} 리스트.
+    kind: 'upper'(상한가) | 'quant'(거래량 급증) | 'rise'(급등) | 'fall'(급락).
+    검색상위와 마찬가지로 market 컬럼이 없어 호출자가 시총 응답으로 사이드 매핑.
+    rise/fall은 전체 시장을 나열하므로 limit으로 자른다."""
+    url = f"https://finance.naver.com/sise/sise_{kind}.naver"
+    try:
+        async with session.get(url) as r:
+            r.raise_for_status()
+            raw = await r.read()
+    except Exception as e:
+        log.warning("sise_%s 페이지 fetch 실패: %s", kind, e)
+        return []
+    html = raw.decode("euc-kr", errors="replace")  # finance.naver.com은 EUC-KR
+    out: list[dict] = []
+    seen: set[str] = set()
+    for m in _SISE_MOVER_ROW.finditer(html):
         rank, code, name = m.group(1), m.group(2), m.group(3).strip()
         if code in seen:
             continue
@@ -193,12 +237,15 @@ def _is_excluded(name: str) -> bool:
 # 메인
 # ---------------------------------------------------------------------------
 async def select_top_async(top_n: int = config.TOP_N) -> list[Candidate]:
-    """2단계 선정:
-    1) 네이버 검색 상위 LASTSEARCH_TOP_N에서 dedup → 검색 순위 그대로 top_n개
-    2) 부족분만 시총상위 z-score 룰로 보강
+    """3단계 선정:
+    1)   네이버 검색 상위 LASTSEARCH_TOP_N에서 dedup → 검색 순위 그대로 top_n개
+    1.5) 부족분을 상한가·거래량 급증(시세 리스트)으로 보강 — 우선순위 상한가 > 거래량
+    2)   그래도 모자라면 시총상위 z-score 룰로 보강
 
-    "오늘 시장 관심사" 우선, "한 주간 추세 강한 종목"은 보강용. 모두 dedup에
-    걸리면 결과 0건도 정상 (사용자 룰: 강제로 채우지 않음)."""
+    "오늘 시장 관심사·실제로 움직인 종목" 우선, "한 주간 추세 강한 종목"은 마지막
+    보강용. 검색상위/시총풀은 거의 고정이라 자주 돌리면 dedup으로 고갈되는데, 상한가·
+    거래량 급증은 매일 명단이 크게 바뀌어 30일 dedup을 통과할 새 종목을 공급한다.
+    모두 dedup에 걸리면 결과 0건도 정상 (사용자 룰: 강제로 채우지 않음)."""
     # 분석 이력 dedup. manual 큐는 이 경로 안 거치므로 영향 없음.
     import storage
     exclude = storage.recently_analyzed_tickers(days=30)
@@ -213,9 +260,24 @@ async def select_top_async(top_n: int = config.TOP_N) -> list[Candidate]:
             _fetch_market_value(session, "KOSDAQ", CANDIDATE_POOL_PER_MARKET))
         search_task = asyncio.create_task(
             _fetch_lastsearch_top(session, LASTSEARCH_TOP_N))
-        kospi, kosdaq, search_hits = await asyncio.gather(
-            kospi_task, kosdaq_task, search_task,
+        upper_task = asyncio.create_task(
+            _fetch_sise_movers(session, "upper", MOVERS_TOP_N))
+        quant_task = asyncio.create_task(
+            _fetch_sise_movers(session, "quant", MOVERS_TOP_N))
+        kospi, kosdaq, search_hits, upper_hits, quant_hits = await asyncio.gather(
+            kospi_task, kosdaq_task, search_task, upper_task, quant_task,
         )
+
+        # 상한가·거래량 급증 = "오늘 실제로 움직인 종목". 검색상위 다음 우선순위로
+        # 보강한다. 우선순위 상한가 > 거래량. 두 소스 간 중복은 source_tag 보존하며 dedup.
+        movers_hits: list[dict] = []
+        movers_seen: set[str] = set()
+        for tag, hits in (("upper", upper_hits), ("quant", quant_hits)):
+            for hit in hits:
+                if hit["ticker"] in movers_seen:
+                    continue
+                movers_seen.add(hit["ticker"])
+                movers_hits.append({**hit, "source_tag": tag})
 
         # 시총 풀 → meta dict (이름·market). 필터(우선주/ETF) 적용.
         meta: dict[str, dict] = {}
@@ -226,17 +288,20 @@ async def select_top_async(top_n: int = config.TOP_N) -> list[Candidate]:
                     continue
                 meta[code] = {"name": name, "market": market}
 
-        # 검색상위에 시총 풀 밖 종목이 있으면 추가 (market은 ? 로 둠).
-        search_extra = 0
-        for hit in search_hits:
+        # 검색상위·상한가·거래량에 시총 풀 밖 종목이 있으면 추가 (market은 ? 로 둠).
+        # 일봉을 받아 점수를 내야 1차/1.5차 통과가 가능하므로 여기서 meta에 합류시킨다.
+        pool_extra = 0
+        for hit in [*search_hits, *movers_hits]:
             code = hit["ticker"]
             if _is_excluded(hit["name"]):
                 continue
             if code not in meta:
                 meta[code] = {"name": hit["name"], "market": "?"}
-                search_extra += 1
-        log.info("후보풀: 시총 KOSPI %d + KOSDAQ %d, 검색상위 %d개 중 풀 밖 %d개 합류 → 총 %d",
-                 len(kospi), len(kosdaq), len(search_hits), search_extra, len(meta))
+                pool_extra += 1
+        log.info("후보풀: 시총 KOSPI %d + KOSDAQ %d, 검색상위 %d·상한가 %d·거래량 %d "
+                 "중 풀 밖 %d개 합류 → 총 %d",
+                 len(kospi), len(kosdaq), len(search_hits),
+                 len(upper_hits), len(quant_hits), pool_extra, len(meta))
 
         # 일봉 병렬 수집 (45일 → 영업일 25개 이상)
         today = date.today()
@@ -286,6 +351,25 @@ async def select_top_async(top_n: int = config.TOP_N) -> list[Candidate]:
         primary_seen.add(code)
         if len(primary) >= top_n:
             break
+    n_search = len(primary)
+
+    # === 1.5단계: 부족분을 상한가·거래량 급증으로 보강 (검색상위 다음 우선) ===
+    # 검색상위와 동일 로직: dedup·점수 산정 통과분만. 매일 명단이 크게 바뀌는
+    # 소스라 dedup 고갈 상황에서도 새 종목이 들어온다.
+    for hit in movers_hits:
+        if len(primary) >= top_n:
+            break
+        code = hit["ticker"]
+        if _is_excluded(hit["name"]):
+            continue
+        if code in exclude or code in primary_seen:
+            continue
+        rec = score_map.get(code)
+        if rec is None:
+            continue
+        primary.append({**rec, "source_tag": hit["source_tag"]})
+        primary_seen.add(code)
+    n_movers = len(primary) - n_search
 
     # === 2단계: 부족분을 시총 풀 z-score 상위로 보강 ===
     extra: list[dict] = []
@@ -301,9 +385,9 @@ async def select_top_async(top_n: int = config.TOP_N) -> list[Candidate]:
                 break
 
     top = primary + extra
-    log.info("선정 결과: 검색상위 %d개 + z-score 보강 %d개 = 총 %d개 "
+    log.info("선정 결과: 검색상위 %d + 상한가·거래량 %d + z-score 보강 %d = 총 %d개 "
              "(dedup 제외 %d종목)",
-             len(primary), len(extra), len(top), len(exclude))
+             n_search, n_movers, len(extra), len(top), len(exclude))
 
     return [
         Candidate(
@@ -316,6 +400,7 @@ async def select_top_async(top_n: int = config.TOP_N) -> list[Candidate]:
             value_surge=round(r["value_surge"], 2),
             foreign_delta=round(r["foreign_delta"], 3),
             score=round(r.get("score", 0.0), 3),
+            source_tag=r.get("source_tag", ""),
         )
         for r in top
     ]
@@ -350,6 +435,7 @@ async def fetch_single_candidate(ticker: str, name: str = "",
         value_surge=round(m["value_surge"], 2),
         foreign_delta=round(m["foreign_delta"], 3),
         score=0.0,
+        source_tag="manual",
     )
 
 

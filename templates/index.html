@@ -200,9 +200,19 @@
     <button class="toggle-btn" onclick="document.getElementById('queue-widget').classList.toggle('collapsed')">▾</button>
   </div>
   <div class="panel-body">
+    {# 선정근거(pick_source) → 아이콘+텍스트 배지. 구버전 큐(NULL)는 배지 없음 #}
+    {% set pick_badges = {
+        'search':  ['🔍', '검색상위', 'pick-search'],
+        'upper':   ['🚀', '상한가',   'pick-upper'],
+        'quant':   ['🔥', '거래량급증', 'pick-quant'],
+        'z-score': ['📊', '일반',     'pick-zscore'],
+        'manual':  ['✍️', '수기',     'pick-manual'],
+        'telegram':['📩', '텔레그램',  'pick-manual'],
+    } %}
     <table class="table compact">
       <tbody>
       {% for q in queue_items %}
+        {% set pb = pick_badges.get(q.pick_source) %}
         <tr>
           <td style="width: 80px;">
             {% if q.status == 'pending' and q.attempts and q.attempts > 0 %}
@@ -213,7 +223,10 @@
               <span class="queue-status queue-{{ q.status }}">{{ q.status }}</span>
             {% endif %}
           </td>
-          <td>{{ q.name or q.ticker }}</td>
+          <td>
+            {{ q.name or q.ticker }}
+            {% if pb %}<span class="pick-src {{ pb[2] }}" title="선정근거: {{ pb[1] }}">{{ pb[0] }} {{ pb[1] }}</span>{% endif %}
+          </td>
           <td class="text-end" style="width: 20px;">
             <form method="post" action="/queue/{{ q.id }}/delete" style="margin:0"
                   onsubmit="return confirm('큐에서 삭제하시겠어요?\n{{ q.name or q.ticker }} ({{ q.ticker }}) · {{ q.status }}');">

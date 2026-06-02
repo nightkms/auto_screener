@@ -186,7 +186,7 @@ async def enqueue_hot_picks(top_n: int = config.TOP_N,
     added: list[str] = []
     for c in cands:
         if storage.add_to_queue(c.ticker, name=c.name, market=c.market,
-                                 source=source):
+                                 source=source, pick_source=c.source_tag):
             added.append(c.ticker)
     log.info("hot picks 큐 추가: %d / %d종목 src=%s (선정 %s)",
              len(added), len(cands), source, [c.ticker for c in cands])
