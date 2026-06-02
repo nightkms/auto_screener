@@ -1,0 +1,372 @@
+"""
+S1: 주간 핫 종목 선정 (네이버 금융 모바일 API 기반).
+
+전략:
+    1. 코스피·코스닥 시가총액 상위 N(=200)을 후보풀로 한다.
+    2. 각 종목 일봉 25개를 비동기 병렬로 받아 주간 등락률·거래대금 급증도를 계산.
+    3. 외국인 보유율 변화로 수급 점수를 보조.
+    4. 1차 필터(ETF/SPAC/우선주/관리/동전주 제외) 후 가중 z-score로 상위 N 추출.
+
+CLI:
+    python selector.py
+"""
+from __future__ import annotations
+
+import asyncio
+import logging
+import math
+import re
+from dataclasses import dataclass, asdict
+from datetime import date, timedelta
+from typing import Iterable
+
+import aiohttp
+
+import config
+
+log = logging.getLogger("selector")
+
+HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                  "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36"
+}
+
+CANDIDATE_POOL_PER_MARKET = 100  # 시장별 시총 상위 N
+SCORE_WEIGHTS = {"return": 0.45, "value_surge": 0.35, "foreign_delta": 0.20}
+LASTSEARCH_TOP_N = 30  # 네이버 검색 상위 페이지에서 가져올 종목 수 (1차 풀)
+
+EXCLUDE_NAME_PAT = re.compile(r"(스팩|우선주|리츠|ETN|ETF|TIGER|KODEX|HANARO|RISE|ARIRANG)")
+EXCLUDE_NAME_SUFFIX = re.compile(r"(우|우B|우C|\(전환\))$")
+PRICE_MIN = 1000           # 동전주 컷
+
+
+# ---------------------------------------------------------------------------
+# 데이터 클래스
+# ---------------------------------------------------------------------------
+@dataclass
+class Candidate:
+    ticker: str
+    name: str
+    market: str
+    close: int
+    market_cap_billion: float        # 단위: 억원
+    weekly_return: float             # %
+    value_surge: float               # 이번 주 평균 거래대금 / 이전 4주 평균
+    foreign_delta: float             # 외국인 보유율 5거래일 변화 (%p)
+    score: float
+
+    def to_dict(self) -> dict:
+        return asdict(self)
+
+
+# ---------------------------------------------------------------------------
+# 후보풀 수집 (시총 상위)
+# ---------------------------------------------------------------------------
+async def _fetch_market_value(session: aiohttp.ClientSession, market: str,
+                              size: int) -> list[dict]:
+    """market: 'KOSPI' | 'KOSDAQ'"""
+    url = ("https://m.stock.naver.com/api/stocks/marketValue/"
+           f"{market}?page=1&pageSize={size}")
+    async with session.get(url) as r:
+        r.raise_for_status()
+        data = await r.json()
+    return data.get("stocks", [])
+
+
+# ---------------------------------------------------------------------------
+# 검색 상위 (네이버 finance.naver.com/sise/lastsearch2.naver)
+# ---------------------------------------------------------------------------
+# 페이지는 EUC-KR HTML. <tr><td>순위</td><td><a href="/item/main.naver?code=...">이름</a>
+# </td><td>검색비율%</td>... 구조. 순위 그대로가 인기 정렬이므로 추가 정렬 불필요.
+_LASTSEARCH_ROW = re.compile(
+    r'<tr[^>]*>\s*<td[^>]*>(\d+)</td>\s*'
+    r'<td[^>]*>\s*<a[^>]*href="/item/main\.naver\?code=(\d{6})"[^>]*>'
+    r'([^<]+)</a>.*?</tr>',
+    re.S,
+)
+
+
+async def _fetch_lastsearch_top(session: aiohttp.ClientSession,
+                                 limit: int) -> list[dict]:
+    """네이버 '검색 상위' 페이지 상위 limit개. {ticker, name} 리스트.
+    market은 여기 안 나옴 — 호출자가 시총상위 응답으로 매핑."""
+    url = "https://finance.naver.com/sise/lastsearch2.naver"
+    try:
+        async with session.get(url) as r:
+            r.raise_for_status()
+            raw = await r.read()
+    except Exception as e:
+        log.warning("lastsearch 페이지 fetch 실패: %s", e)
+        return []
+    # 네이버 finance.naver.com은 EUC-KR
+    html = raw.decode("euc-kr", errors="replace")
+    out: list[dict] = []
+    seen: set[str] = set()
+    for m in _LASTSEARCH_ROW.finditer(html):
+        rank, code, name = m.group(1), m.group(2), m.group(3).strip()
+        if code in seen:
+            continue
+        seen.add(code)
+        out.append({"rank": int(rank), "ticker": code, "name": name})
+        if len(out) >= limit:
+            break
+    return out
+
+
+# ---------------------------------------------------------------------------
+# 일봉 25개 (비동기)
+# ---------------------------------------------------------------------------
+async def _fetch_chart(session: aiohttp.ClientSession, code: str,
+                       sem: asyncio.Semaphore,
+                       start: str, end: str) -> tuple[str, list[dict]]:
+    url = (f"https://api.stock.naver.com/chart/domestic/item/{code}/day"
+           f"?startDateTime={start}&endDateTime={end}")
+    async with sem:
+        try:
+            async with session.get(url) as r:
+                if r.status != 200:
+                    return code, []
+                rows = await r.json()
+                return code, rows if isinstance(rows, list) else []
+        except Exception as e:                            # noqa
+            log.warning("chart fail %s: %s", code, e)
+            return code, []
+
+
+# ---------------------------------------------------------------------------
+# 점수 계산
+# ---------------------------------------------------------------------------
+def _score_stock(rows: list[dict]) -> dict | None:
+    """일봉 25개 → 지표 dict. 데이터 부족 시 None."""
+    if len(rows) < 10:
+        return None
+    # 신구 순서가 일정한지 보장: localDate 오름차순 정렬
+    rows = sorted(rows, key=lambda r: r["localDate"])
+    closes = [float(r["closePrice"]) for r in rows]
+    vols   = [float(r["accumulatedTradingVolume"]) for r in rows]
+    # 거래대금 근사: vol × close
+    trading_values = [c * v for c, v in zip(closes, vols)]
+
+    # 주간(직전 5거래일) vs 그 이전 (전 4주)
+    week = trading_values[-5:]
+    prior = trading_values[:-5] if len(trading_values) > 5 else []
+    week_avg = sum(week) / len(week)
+    prior_avg = (sum(prior) / len(prior)) if prior else float("nan")
+    value_surge = (week_avg / prior_avg) if prior_avg and not math.isnan(prior_avg) else 0.0
+
+    weekly_return = (closes[-1] - closes[-6]) / closes[-6] * 100 if len(closes) >= 6 else 0.0
+
+    # 외국인 보유율 변화 (5거래일)
+    fr = [r.get("foreignRetentionRate") for r in rows]
+    fr = [float(x) for x in fr if x is not None]
+    foreign_delta = (fr[-1] - fr[-6]) if len(fr) >= 6 else 0.0
+
+    return {
+        "close": int(closes[-1]),
+        "weekly_return": weekly_return,
+        "value_surge": value_surge,
+        "foreign_delta": foreign_delta,
+    }
+
+
+def _zscore(values: list[float]) -> list[float]:
+    if not values:
+        return []
+    mean = sum(values) / len(values)
+    var = sum((v - mean) ** 2 for v in values) / len(values)
+    std = math.sqrt(var) or 1.0
+    return [(v - mean) / std for v in values]
+
+
+# ---------------------------------------------------------------------------
+# 필터
+# ---------------------------------------------------------------------------
+def _is_excluded(name: str) -> bool:
+    if EXCLUDE_NAME_PAT.search(name):
+        return True
+    if EXCLUDE_NAME_SUFFIX.search(name):
+        return True
+    return False
+
+
+# ---------------------------------------------------------------------------
+# 메인
+# ---------------------------------------------------------------------------
+async def select_top_async(top_n: int = config.TOP_N) -> list[Candidate]:
+    """2단계 선정:
+    1) 네이버 검색 상위 LASTSEARCH_TOP_N에서 dedup → 검색 순위 그대로 top_n개
+    2) 부족분만 시총상위 z-score 룰로 보강
+
+    "오늘 시장 관심사" 우선, "한 주간 추세 강한 종목"은 보강용. 모두 dedup에
+    걸리면 결과 0건도 정상 (사용자 룰: 강제로 채우지 않음)."""
+    # 분석 이력 dedup. manual 큐는 이 경로 안 거치므로 영향 없음.
+    import storage
+    exclude = storage.recently_analyzed_tickers(days=30)
+
+    timeout = aiohttp.ClientTimeout(total=60)
+    async with aiohttp.ClientSession(headers=HEADERS, timeout=timeout) as session:
+        # === 데이터 fetch: 검색상위 + 시총 풀 + 일봉 ===
+        # 검색상위는 market 컬럼이 없어 시총 응답으로 사이드 매핑.
+        kospi_task = asyncio.create_task(
+            _fetch_market_value(session, "KOSPI", CANDIDATE_POOL_PER_MARKET))
+        kosdaq_task = asyncio.create_task(
+            _fetch_market_value(session, "KOSDAQ", CANDIDATE_POOL_PER_MARKET))
+        search_task = asyncio.create_task(
+            _fetch_lastsearch_top(session, LASTSEARCH_TOP_N))
+        kospi, kosdaq, search_hits = await asyncio.gather(
+            kospi_task, kosdaq_task, search_task,
+        )
+
+        # 시총 풀 → meta dict (이름·market). 필터(우선주/ETF) 적용.
+        meta: dict[str, dict] = {}
+        for market, lst in (("KOSPI", kospi), ("KOSDAQ", kosdaq)):
+            for s in lst:
+                code, name = s["itemCode"], s["stockName"]
+                if _is_excluded(name):
+                    continue
+                meta[code] = {"name": name, "market": market}
+
+        # 검색상위에 시총 풀 밖 종목이 있으면 추가 (market은 ? 로 둠).
+        search_extra = 0
+        for hit in search_hits:
+            code = hit["ticker"]
+            if _is_excluded(hit["name"]):
+                continue
+            if code not in meta:
+                meta[code] = {"name": hit["name"], "market": "?"}
+                search_extra += 1
+        log.info("후보풀: 시총 KOSPI %d + KOSDAQ %d, 검색상위 %d개 중 풀 밖 %d개 합류 → 총 %d",
+                 len(kospi), len(kosdaq), len(search_hits), search_extra, len(meta))
+
+        # 일봉 병렬 수집 (45일 → 영업일 25개 이상)
+        today = date.today()
+        start = (today - timedelta(days=45)).strftime("%Y%m%d")
+        end = today.strftime("%Y%m%d")
+        sem = asyncio.Semaphore(20)
+        results = await asyncio.gather(*[
+            _fetch_chart(session, code, sem, start, end) for code in meta
+        ])
+
+    # === 점수 계산: 시총 풀 종목만 z-score 산정 (보강용) ===
+    scored: list[dict] = []
+    for code, rows in results:
+        m = _score_stock(rows)
+        if not m:
+            continue
+        if m["close"] < PRICE_MIN:
+            continue
+        scored.append({"ticker": code, **meta[code], **m})
+
+    score_map = {r["ticker"]: r for r in scored}
+    if scored:
+        z_ret = _zscore([r["weekly_return"] for r in scored])
+        z_val = _zscore([r["value_surge"] for r in scored])
+        z_fr  = _zscore([r["foreign_delta"] for r in scored])
+        for i, r in enumerate(scored):
+            r["score"] = (
+                z_ret[i] * SCORE_WEIGHTS["return"]
+                + z_val[i] * SCORE_WEIGHTS["value_surge"]
+                + z_fr[i] * SCORE_WEIGHTS["foreign_delta"]
+            )
+
+    # === 1단계: 검색상위에서 dedup → 검색 순위 그대로 ===
+    primary: list[dict] = []
+    primary_seen: set[str] = set()
+    for hit in search_hits:
+        code = hit["ticker"]
+        if code in exclude or code in primary_seen:
+            continue
+        rec = score_map.get(code)
+        if rec is None:
+            # 일봉 부족·동전주 컷 등으로 점수 못 낸 종목. 검색상위 신호는
+            # 강하므로 _fetch_chart 결과 없어도 통과시키지 않고 스킵.
+            # (보고서 단계에서 데이터 누락이 더 큰 문제)
+            continue
+        primary.append({**rec, "source_tag": "search"})
+        primary_seen.add(code)
+        if len(primary) >= top_n:
+            break
+
+    # === 2단계: 부족분을 시총 풀 z-score 상위로 보강 ===
+    extra: list[dict] = []
+    shortfall = top_n - len(primary)
+    if shortfall > 0 and scored:
+        scored_sorted = sorted(scored, key=lambda r: r["score"], reverse=True)
+        for r in scored_sorted:
+            if r["ticker"] in exclude or r["ticker"] in primary_seen:
+                continue
+            extra.append({**r, "source_tag": "z-score"})
+            primary_seen.add(r["ticker"])
+            if len(extra) >= shortfall:
+                break
+
+    top = primary + extra
+    log.info("선정 결과: 검색상위 %d개 + z-score 보강 %d개 = 총 %d개 "
+             "(dedup 제외 %d종목)",
+             len(primary), len(extra), len(top), len(exclude))
+
+    return [
+        Candidate(
+            ticker=r["ticker"],
+            name=r["name"],
+            market=r["market"],
+            close=r["close"],
+            market_cap_billion=0.0,
+            weekly_return=round(r["weekly_return"], 2),
+            value_surge=round(r["value_surge"], 2),
+            foreign_delta=round(r["foreign_delta"], 3),
+            score=round(r.get("score", 0.0), 3),
+        )
+        for r in top
+    ]
+
+
+def select_top(top_n: int = config.TOP_N) -> list[Candidate]:
+    return asyncio.run(select_top_async(top_n))
+
+
+async def fetch_single_candidate(ticker: str, name: str = "",
+                                  market: str = "") -> Candidate | None:
+    """단일 종목에 대한 Candidate 빌더. 큐 분석용 (selector 우회)."""
+    timeout = aiohttp.ClientTimeout(total=30)
+    async with aiohttp.ClientSession(headers=HEADERS, timeout=timeout) as session:
+        today = date.today()
+        start = (today - timedelta(days=45)).strftime("%Y%m%d")
+        end = today.strftime("%Y%m%d")
+        sem = asyncio.Semaphore(1)
+        _, rows = await _fetch_chart(session, ticker, sem, start, end)
+    if not rows:
+        return None
+    m = _score_stock(rows)
+    if not m:
+        return None
+    return Candidate(
+        ticker=ticker,
+        name=name or ticker,
+        market=market or "?",
+        close=m["close"],
+        market_cap_billion=0.0,
+        weekly_return=round(m["weekly_return"], 2),
+        value_surge=round(m["value_surge"], 2),
+        foreign_delta=round(m["foreign_delta"], 3),
+        score=0.0,
+    )
+
+
+# ---------------------------------------------------------------------------
+# CLI
+# ---------------------------------------------------------------------------
+def _print_table(rows: Iterable[Candidate]) -> None:
+    print(f"{'순위':<4}{'코드':<8}{'종목명':<16}{'시장':<8}{'종가':>10}"
+          f"{'주간%':>9}{'거래대금배수':>13}{'외인Δ%p':>10}{'score':>8}")
+    print("-" * 86)
+    for i, c in enumerate(rows, 1):
+        print(f"{i:<4}{c.ticker:<8}{c.name:<16}{c.market:<8}"
+              f"{c.close:>10,}{c.weekly_return:>9.2f}{c.value_surge:>13.2f}"
+              f"{c.foreign_delta:>10.3f}{c.score:>8.3f}")
+
+
+if __name__ == "__main__":
+    logging.basicConfig(level=config.LOG_LEVEL, format="%(asctime)s %(name)s %(message)s")
+    rows = select_top()
+    _print_table(rows)

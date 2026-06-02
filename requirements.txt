@@ -1,0 +1,12 @@
+claude-agent-sdk>=0.1.0
+pykrx>=1.0.45
+requests>=2.32.0
+python-dotenv>=1.0.1
+APScheduler>=3.10.4
+fastapi>=0.115.0
+uvicorn[standard]>=0.32.0
+jinja2>=3.1.4
+python-telegram-bot>=21.6
+aiohttp>=3.10.0
+pandas>=2.2.0
+numpy>=1.26.0

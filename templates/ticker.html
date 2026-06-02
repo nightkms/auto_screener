@@ -1,0 +1,101 @@
+{% extends "base.html" %}
+{% block body %}
+<style>
+  .ticker-head {
+    display: flex; justify-content: space-between; align-items: baseline;
+    margin-bottom: 1rem;
+  }
+  .ticker-head h4 { margin: 0; }
+  .ticker-head .code { color: var(--ink-muted); font-family: ui-monospace, Consolas, monospace; margin-left: 8px; }
+  .sub-cell { font-family: ui-monospace, Consolas, monospace; text-align: right; }
+  .sub-delta { font-size: 10px; margin-left: 4px; color: var(--ink-muted); }
+  .sub-delta.up { color: var(--strong); }
+  .sub-delta.down { color: #b91c1c; }
+  .source-pill {
+    display: inline-block; padding: 0 6px; border-radius: 3px;
+    font-size: 10px; color: var(--ink-muted); background: #f3f4f6;
+  }
+</style>
+
+<a href="/" class="btn btn-sm btn-outline-secondary mb-3">← 전체</a>
+
+<div class="ticker-head">
+  <div>
+    <h4>{{ name }}<span class="code">{{ ticker }}</span></h4>
+    <div class="muted mt-1">
+      보고서 {{ stats.count }}건
+      {% if stats.best_grade %}
+        · 최고 <span class="grade-pill grade-{{ stats.best_grade }}">{{ stats.best_grade }}</span>
+      {% endif %}
+      {% if stats.max_rating is not none %}
+        · 최고 ★{{ "%.2f"|format(stats.max_rating) }}
+      {% endif %}
+      {% if stats.latest_rating is not none %}
+        · 최신 ★{{ "%.2f"|format(stats.latest_rating) }}
+      {% endif %}
+    </div>
+  </div>
+  <div>
+    <a href="https://m.stock.naver.com/domestic/stock/{{ ticker }}/total" target="_blank"
+       rel="noopener" class="btn btn-sm btn-outline-secondary">네이버 ↗</a>
+  </div>
+</div>
+
+<div class="panel">
+  <div class="panel-head">
+    <h6>📈 분석 이력 (최신순)</h6>
+    <span class="meta">등급·★·서브에이전트 점수 변화</span>
+  </div>
+  <div class="panel-body">
+    <table class="table compact">
+      <thead><tr>
+        {% set SUB_LABEL = {
+            'valuation': '밸류에이션',
+            'industry': '산업',
+            'price_flow': '수급',
+            'catalyst': '카탈리스트',
+            'risk': '리스크'
+        } %}
+        <th>분석일</th><th>주차</th><th>출처</th><th>등급</th><th class="text-end">★</th>
+        {% for s in sub_names %}<th class="text-end">{{ SUB_LABEL.get(s, s) }}</th>{% endfor %}
+        <th>토큰</th><th></th>
+      </tr></thead>
+      <tbody>
+      {% for r in reports %}
+        {# 다음(=더 이전) 보고서 — 변화량 비교용 #}
+        {% set prev = reports[loop.index] if loop.index < reports|length else None %}
+        <tr>
+          <td class="muted">{{ r.run_started[:16] }}</td>
+          <td class="muted mono">{{ r.week_label }}</td>
+          <td><span class="source-pill">{{ r.run_source }}</span></td>
+          <td><span class="grade-pill grade-{{ r.grade }}">{{ r.grade }}</span></td>
+          <td class="sub-cell">
+            {{ "%.2f"|format(r.avg_rating) if r.avg_rating is not none else "-" }}
+            {% if prev and prev.avg_rating is not none and r.avg_rating is not none %}
+              {% set d = r.avg_rating - prev.avg_rating %}
+              {% if d > 0.005 %}<span class="sub-delta up">▲{{ "%.2f"|format(d) }}</span>
+              {% elif d < -0.005 %}<span class="sub-delta down">▼{{ "%.2f"|format(-d) }}</span>{% endif %}
+            {% endif %}
+          </td>
+          {% for s in sub_names %}
+            <td class="sub-cell">
+              {% set cur = r.sub.get(s) %}
+              {{ "%.1f"|format(cur) if cur is not none else "-" }}
+              {% if prev and cur is not none and prev.sub.get(s) is not none %}
+                {% set d = cur - prev.sub.get(s) %}
+                {% if d > 0.05 %}<span class="sub-delta up">▲{{ "%.1f"|format(d) }}</span>
+                {% elif d < -0.05 %}<span class="sub-delta down">▼{{ "%.1f"|format(-d) }}</span>{% endif %}
+              {% endif %}
+            </td>
+          {% endfor %}
+          <td class="muted mono">{{ r.tokens_in }}/{{ r.tokens_out }}</td>
+          <td><a href="/report/{{ r.id }}" class="muted">보고서 →</a></td>
+        </tr>
+      {% else %}
+        <tr><td colspan="99" class="text-center muted py-5">이 종목 보고서 없음</td></tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+{% endblock %}

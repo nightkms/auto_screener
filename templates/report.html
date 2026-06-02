@@ -1,0 +1,264 @@
+{% extends "base.html" %}
+{% block body %}
+<style>
+  /* 이 페이지에서만 컨테이너 폭 확장 (채팅 옆 배치 공간 확보) */
+  body > .container {
+    max-width: min(1700px, calc(100vw - 32px));
+  }
+
+  .report-layout {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) 400px;
+    gap: 1.25rem;
+    align-items: start;
+    /* 보고서 pre와 채팅창이 공유하는 높이 변수 */
+    --content-h: calc(100vh - 180px);
+  }
+  .report-main { min-width: 0; }
+  .report-main pre.markdown {
+    height: var(--content-h);
+    max-height: var(--content-h);
+    margin: 0;
+  }
+
+  /* 우측 채팅 영역 */
+  .qa-section {
+    position: sticky;
+    top: 12px;
+    height: var(--content-h);
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    overflow: hidden;
+  }
+  .qa-section .panel-head {
+    padding: 8px 12px; background: #fafbfc;
+    border-bottom: 1px solid var(--border);
+  }
+  .qa-history {
+    flex: 1; min-height: 0; overflow-y: auto;
+    padding: 0;
+  }
+  .qa-msg { padding: 10px 14px; border-bottom: 1px solid #f0f1f4; }
+  .qa-msg:last-child { border-bottom: 0; }
+  .qa-msg.user { background: #f8f9fb; }
+  .qa-msg.assistant { background: #fff; }
+  .qa-role {
+    font-size: 10px; font-weight: 700; letter-spacing: .04em;
+    text-transform: uppercase; margin-bottom: 4px;
+  }
+  .qa-role.user { color: var(--accent); }
+  .qa-role.assistant { color: var(--strong); }
+  .qa-content {
+    white-space: pre-wrap; word-break: break-word;
+    font-size: 13px; line-height: 1.55;
+    font-family: 'Malgun Gothic', sans-serif;
+  }
+  .qa-meta { font-size: 10px; color: var(--ink-muted); margin-top: 4px; }
+  .qa-sources { margin-top: 6px; font-size: 11px; }
+  .qa-sources details { color: var(--ink-muted); }
+  .qa-sources summary { cursor: pointer; }
+  .qa-sources ul { margin: 4px 0 0 0; padding-left: 16px; word-break: break-all; }
+  .qa-empty { padding: 18px; text-align: center; color: var(--ink-muted); font-size: 12px; }
+
+  .qa-form {
+    border-top: 1px solid var(--border);
+    padding: 8px 10px;
+    background: #fafbfc;
+  }
+  .qa-form textarea {
+    width: 100%; min-height: 64px; padding: 8px 10px;
+    border: 1px solid var(--border); border-radius: 6px;
+    font-family: 'Malgun Gothic', sans-serif; font-size: 13px;
+    resize: vertical; box-sizing: border-box;
+  }
+  .qa-form .row-actions {
+    display: flex; justify-content: space-between; align-items: center;
+    margin-top: 6px; gap: 8px;
+  }
+  .qa-form .hint { font-size: 10px; color: var(--ink-muted); flex: 1; }
+  #qa-loading { display: none; }
+  #qa-loading.show { display: inline; }
+  #qa-error {
+    display: none; margin-top: 6px; padding: 6px 10px;
+    background: #fde8e8; color: #b91c1c; border-radius: 6px; font-size: 12px;
+  }
+  #qa-error.show { display: block; }
+
+  /* 모바일 / 좁은 화면: 세로 스택 */
+  @media (max-width: 1099px) {
+    body > .container { max-width: 100%; }
+    .report-layout { grid-template-columns: 1fr; }
+    .qa-section {
+      position: static; max-height: 70vh;
+    }
+    .report-main pre.markdown { max-height: 60vh; }
+  }
+</style>
+
+<div class="d-flex justify-content-between align-items-center mb-2">
+  <a href="/run/{{ report.run_id }}" class="btn btn-sm btn-outline-secondary">← Run #{{ report.run_id }}</a>
+  <form method="post" action="/report/{{ report.id }}/delete" style="margin:0"
+        onsubmit="return confirm('보고서를 삭제하시겠어요?\n{{ report.name }} ({{ report.ticker }}) · ★{{ report.avg_rating }}\nDB row와 .md 파일이 함께 삭제됩니다.');">
+    <button class="btn btn-sm btn-outline-danger" title="보고서 삭제">🗑 삭제</button>
+  </form>
+</div>
+<h4 class="mb-1"><a href="/ticker/{{ report.ticker }}" class="text-decoration-none" title="이 종목의 모든 보고서 보기">{{ report.name }}</a> ({{ report.ticker }}) — <span class="grade-pill grade-{{ report.grade }}">{{ report.grade }}</span> ★{{ report.avg_rating }}</h4>
+<p class="text-muted small mb-3">{{ report.md_path }}</p>
+
+<div class="report-layout">
+  <div class="report-main">
+    <pre class="markdown">{{ markdown }}</pre>
+  </div>
+
+  <aside class="qa-section" data-report-id="{{ report.id }}">
+    <div class="panel-head">
+      <h6>💬 보고서에 추가 질문</h6>
+      <span class="meta">Sonnet 4.6 · WebSearch 허용</span>
+    </div>
+    <div class="qa-history" id="qa-history">
+      {% if qa_history %}
+        {% for m in qa_history %}
+          <div class="qa-msg {{ m.role }}">
+            <div class="qa-role {{ m.role }}">{{ 'Q' if m.role == 'user' else 'A' }} · {{ m.created_at }}</div>
+            <div class="qa-content">{{ m.content }}</div>
+            {% if m.role == 'assistant' %}
+              <div class="qa-meta">
+                {% if m.tokens_in or m.tokens_out %}
+                  토큰 {{ '{:,}'.format(m.tokens_in) }} in / {{ '{:,}'.format(m.tokens_out) }} out · {{ m.elapsed_s }}s
+                {% endif %}
+              </div>
+              {% if m.sources %}
+                <div class="qa-sources">
+                  <details>
+                    <summary>출처 {{ m.sources|length }}건</summary>
+                    <ul>
+                      {% for s in m.sources %}
+                        <li>
+                          <span class="muted">{{ s.tool }}</span>:
+                          {% if s.url %}<a href="{{ s.url }}" target="_blank" rel="noopener">{{ s.url }}</a>
+                          {% elif s.query %}<span>"{{ s.query }}"</span>
+                          {% else %}<span class="muted">{{ s }}</span>{% endif %}
+                        </li>
+                      {% endfor %}
+                    </ul>
+                  </details>
+                </div>
+              {% endif %}
+            {% endif %}
+          </div>
+        {% endfor %}
+      {% else %}
+        <div class="qa-empty" id="qa-empty">
+          아직 질문이 없습니다.<br>
+          보고서 내용·종목 펀더멘털·최신 뉴스 등 자유롭게 물어보세요.
+        </div>
+      {% endif %}
+    </div>
+
+    <form class="qa-form" id="qa-form" onsubmit="return false;">
+      <textarea id="qa-input" placeholder="추가 질문 (Ctrl+Enter 전송)" maxlength="4000"></textarea>
+      <div class="row-actions">
+        <span class="hint">
+          <span id="qa-loading">⏳ 답변 생성 중 (30~120초)...</span>
+        </span>
+        <button id="qa-submit" type="submit" class="btn btn-primary btn-sm">전송</button>
+      </div>
+      <div id="qa-error"></div>
+    </form>
+  </aside>
+</div>
+
+<script>
+(function() {
+  const section = document.querySelector('.qa-section');
+  if (!section) return;
+  const reportId = section.dataset.reportId;
+  const form = document.getElementById('qa-form');
+  const input = document.getElementById('qa-input');
+  const submit = document.getElementById('qa-submit');
+  const loading = document.getElementById('qa-loading');
+  const errBox = document.getElementById('qa-error');
+  const history = document.getElementById('qa-history');
+  const emptyMsg = document.getElementById('qa-empty');
+
+  function escapeHtml(s) {
+    return String(s).replace(/[&<>"']/g, c =>
+      ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+  }
+
+  function appendMsg(role, content, meta) {
+    if (emptyMsg) emptyMsg.remove();
+    const div = document.createElement('div');
+    div.className = 'qa-msg ' + role;
+    const ts = new Date().toISOString().slice(0,19).replace('T',' ');
+    const roleLabel = role === 'user' ? 'Q' : 'A';
+    let html = `<div class="qa-role ${role}">${roleLabel} · ${ts}</div>
+                <div class="qa-content">${escapeHtml(content)}</div>`;
+    if (role === 'assistant' && meta) {
+      if (meta.tokens_in || meta.tokens_out) {
+        html += `<div class="qa-meta">토큰 ${meta.tokens_in.toLocaleString()} in / ${meta.tokens_out.toLocaleString()} out · ${meta.elapsed_s}s</div>`;
+      }
+      if (meta.sources && meta.sources.length) {
+        const items = meta.sources.map(s => {
+          if (s.url) return `<li><span class="muted">${escapeHtml(s.tool)}</span>: <a href="${escapeHtml(s.url)}" target="_blank" rel="noopener">${escapeHtml(s.url)}</a></li>`;
+          if (s.query) return `<li><span class="muted">${escapeHtml(s.tool)}</span>: "${escapeHtml(s.query)}"</li>`;
+          return `<li><span class="muted">${escapeHtml(JSON.stringify(s))}</span></li>`;
+        }).join('');
+        html += `<div class="qa-sources"><details open><summary>출처 ${meta.sources.length}건</summary><ul>${items}</ul></details></div>`;
+      }
+    }
+    div.innerHTML = html;
+    history.appendChild(div);
+    history.scrollTop = history.scrollHeight;
+  }
+
+  async function send() {
+    const q = input.value.trim();
+    if (!q) return;
+    errBox.classList.remove('show');
+    submit.disabled = true;
+    loading.classList.add('show');
+    appendMsg('user', q);
+    input.value = '';
+    try {
+      const r = await fetch(`/report/${reportId}/ask`, {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({question: q}),
+      });
+      const data = await r.json();
+      if (!r.ok || data.error && !data.answer) {
+        errBox.textContent = '에러: ' + (data.error || r.statusText);
+        errBox.classList.add('show');
+      } else {
+        appendMsg('assistant', data.answer, {
+          tokens_in: data.tokens_in || 0,
+          tokens_out: data.tokens_out || 0,
+          elapsed_s: data.elapsed_s || 0,
+          sources: data.sources || [],
+        });
+      }
+    } catch (e) {
+      errBox.textContent = '네트워크 에러: ' + e.message;
+      errBox.classList.add('show');
+    } finally {
+      submit.disabled = false;
+      loading.classList.remove('show');
+    }
+  }
+
+  submit.addEventListener('click', send);
+  input.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
+      e.preventDefault(); send();
+    }
+  });
+
+  history.scrollTop = history.scrollHeight;
+})();
+</script>
+{% endblock %}

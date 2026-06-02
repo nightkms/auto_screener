@@ -1,0 +1,19 @@
+.env
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+data/*.db
+data/*.db-journal
+data/cache/
+data/screener.pid
+logs/
+.pytest_cache/
+*.egg-info/
+.idea/
+.vscode/
+
+# 로컬 실행/진단 보조물 (공개 불필요, 절대경로·환경 의존)
+_diag*.py
+_get_pid.ps1
+_silence_console.py

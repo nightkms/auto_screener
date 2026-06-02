@@ -1,0 +1,230 @@
+{% extends "base.html" %}
+{% block body %}
+
+{% if hot_flash is not none %}
+  {% if hot_flash|int == 0 %}
+    <div class="alert alert-warning py-2 small">⚠ 큐에 추가된 종목 없음 — 검색 상위 + 시총 상위 후보 모두 최근 30일 이내 분석 이력이 있어 dedup에 걸렸습니다. 시간이 지나 dedup이 풀리면 자연히 추가됩니다.</div>
+  {% else %}
+    <div class="alert alert-success py-2 small">▶ 핫 종목 {{ hot_flash }}개 큐에 추가됨. 워커가 1개씩 분석합니다.</div>
+  {% endif %}
+{% endif %}
+{% if err_flash %}
+  <div class="alert alert-danger py-2 small">❌ 오류: {{ err_flash }} (logs/screener.err.log 확인)</div>
+{% endif %}
+{% if queued_flash %}
+  <div class="alert alert-success py-2 small">✓ 큐에 추가: <code>{{ queued_flash }}</code></div>
+{% endif %}
+{% if dup_flash %}
+  <div class="alert alert-warning py-2 small">⚠ <code>{{ dup_flash }}</code> 이미 큐에 있거나 잘못된 코드</div>
+{% endif %}
+{% if queue_items %}
+  <meta http-equiv="refresh" content="10">
+{% endif %}
+
+<!-- 통계 카드 4개 -->
+<div class="row g-2 mb-3">
+  <div class="col"><div class="stat-card"><div class="stat-num">{{ stats.runs }}</div><div class="stat-label">총 실행</div></div></div>
+  <div class="col"><div class="stat-card"><div class="stat-num" style="color: var(--strong)">{{ stats.strong }}</div><div class="stat-label">STRONG 누계</div></div></div>
+  <div class="col"><div class="stat-card"><div class="stat-num" style="color: var(--watch)">{{ stats.watch }}</div><div class="stat-label">WATCH 누계</div></div></div>
+  <div class="col"><div class="stat-card"><div class="stat-num">{{ stats.tokens_total }}</div><div class="stat-label">최근 30회 토큰</div></div></div>
+</div>
+
+<!-- 메인: 왼쪽 최근 분석 / 오른쪽 큐 + 강력매수 + 실행이력 -->
+<div class="row g-2">
+  <!-- 왼쪽: 최근 분석 (페이징) -->
+  <div class="col-lg-8">
+    <div class="panel">
+      <div class="panel-head">
+        <h6>📊 최근 분석 종목</h6>
+        <span class="meta">{% if grade_filter %}{{ grade_filter|join(',') }} {% endif %}{% if search_q %}'{{ search_q }}' {% endif %}{{ recent_total }}건 · {{ recent_page }} / {{ recent_total_pages }}</span>
+      </div>
+      {# URL 빌더용 단편: grade와 q를 각각 query string 조각으로. 등급 토글 시 q 유지, 페이지 이동 시 둘 다 유지. #}
+      {% set grade_qs = '' %}
+      {% if grade_filter %}{% set grade_qs = '&grade=' + grade_filter|join('&grade=') %}{% endif %}
+      {% set q_qs = '' %}
+      {% if search_q %}{% set q_qs = '&q=' + search_q|urlencode %}{% endif %}
+      <div class="grade-filter">
+        <a class="grade-chip {% if not grade_filter %}active{% endif %}"
+           href="?{% if q_qs %}{{ q_qs[1:] }}{% endif %}">전체</a>
+        {% for g in all_grades %}
+          {% set is_on = g in grade_filter %}
+          {% if is_on %}
+            {# 이 등급을 끄는 링크 (나머지만 남김) #}
+            {% set remaining = grade_filter|reject('equalto', g)|list %}
+            <a class="grade-chip grade-{{ g }} active"
+               href="?{% if remaining %}grade={{ remaining|join('&grade=') }}{% endif %}{{ q_qs }}">{{ g }} ×</a>
+          {% else %}
+            {# 이 등급을 추가하는 링크 #}
+            <a class="grade-chip grade-{{ g }}"
+               href="?{% if grade_filter %}grade={{ grade_filter|join('&grade=') }}&{% endif %}grade={{ g }}{{ q_qs }}">+ {{ g }}</a>
+          {% endif %}
+        {% endfor %}
+        {# 검색 폼은 ms-auto로 오른쪽 정렬 (.grade-filter는 flex container).
+           폰트·패딩은 좌측 grade-chip과 시각적으로 맞춤 (11px / padding 2px 10px).
+           input의 네이티브 × (type=search에서 브라우저가 그려줌) 클릭 → 빈 값으로
+           바뀌면 onsearch 이벤트로 form 재submit → 검색 해제. Esc로도 동일 동작. #}
+        <form method="get" action="/" class="d-inline-flex align-items-center ms-auto" style="gap:.25rem;">
+          {# 등급 필터는 hidden으로 유지해 검색 후에도 활성 등급 보존 #}
+          {% for g in grade_filter %}<input type="hidden" name="grade" value="{{ g }}">{% endfor %}
+          <input type="search" name="q" value="{{ search_q or '' }}"
+                 placeholder="종목명/코드 검색" class="form-control form-control-sm"
+                 style="width:160px; font-size:11px; padding:2px 10px; height:auto; line-height:1.5;"
+                 autocomplete="off"
+                 onsearch="if (!this.value) this.form.submit();">
+          <button class="btn btn-sm btn-outline-secondary" type="submit"
+                  style="font-size:11px; font-weight:600; letter-spacing:.02em; padding:2px 10px; line-height:1.5;">검색</button>
+        </form>
+      </div>
+      <div class="panel-body">
+        <table class="table compact">
+          <thead><tr>
+            <th>등급</th><th>종목</th><th class="text-end">★</th>
+            <th>주차</th><th>분석일</th><th></th><th></th>
+          </tr></thead>
+          <tbody>
+          {% for r in recent_items %}
+            <tr>
+              <td><span class="grade-pill grade-{{ r.grade }}">{{ r.grade }}</span></td>
+              <td><a href="/ticker/{{ r.ticker }}" class="name text-decoration-none" title="이 종목의 모든 보고서 보기">{{ r.name }}</a>
+                  <span class="muted ms-1 mono">{{ r.ticker }}</span></td>
+              <td class="text-end mono">{{ "%.2f"|format(r.avg_rating) }}</td>
+              <td class="muted mono">{{ r.week_label }}</td>
+              <td class="muted">{{ r.run_started[:16] }}</td>
+              <td><a href="/report/{{ r.id }}" class="muted">보고서 →</a></td>
+              <td class="text-end" style="width: 20px;">
+                <form method="post" action="/report/{{ r.id }}/delete?next=/?page={{ recent_page }}"
+                      style="margin:0"
+                      onsubmit="return confirm('보고서를 삭제하시겠어요?\n{{ r.name }} ({{ r.ticker }}) · ★{{ "%.2f"|format(r.avg_rating) }}\nDB row와 .md 파일이 함께 삭제됩니다.');">
+                  <button class="btn btn-sm btn-link p-0 muted" title="보고서 삭제">×</button>
+                </form>
+              </td>
+            </tr>
+          {% else %}
+            <tr><td colspan="7" class="text-center muted py-5">분석 결과 없음</td></tr>
+          {% endfor %}
+          </tbody>
+        </table>
+      </div>
+      {% if recent_total_pages > 1 %}
+      {# grade_qs/q_qs는 위 grade-filter 블록에서 정의됨 — 그대로 재사용 #}
+      {% set filter_qs = grade_qs + q_qs %}
+      <div class="panel-head" style="border-top: 1px solid var(--border); border-bottom: 0;">
+        <nav>
+          <ul class="pagination pagination-sm mb-0">
+            <li class="page-item {% if recent_page <= 1 %}disabled{% endif %}">
+              <a class="page-link" href="?page={{ recent_page - 1 }}{{ filter_qs }}">‹</a>
+            </li>
+            {% set start = [1, recent_page - 3]|max %}
+            {% set end = [recent_total_pages, recent_page + 3]|min %}
+            {% if start > 1 %}
+              <li class="page-item"><a class="page-link" href="?page=1{{ filter_qs }}">1</a></li>
+              {% if start > 2 %}<li class="page-item disabled"><span class="page-link">…</span></li>{% endif %}
+            {% endif %}
+            {% for p in range(start, end + 1) %}
+              <li class="page-item {% if p == recent_page %}active{% endif %}">
+                <a class="page-link" href="?page={{ p }}{{ filter_qs }}">{{ p }}</a>
+              </li>
+            {% endfor %}
+            {% if end < recent_total_pages %}
+              {% if end < recent_total_pages - 1 %}<li class="page-item disabled"><span class="page-link">…</span></li>{% endif %}
+              <li class="page-item"><a class="page-link" href="?page={{ recent_total_pages }}{{ filter_qs }}">{{ recent_total_pages }}</a></li>
+            {% endif %}
+            <li class="page-item {% if recent_page >= recent_total_pages %}disabled{% endif %}">
+              <a class="page-link" href="?page={{ recent_page + 1 }}{{ filter_qs }}">›</a>
+            </li>
+          </ul>
+        </nav>
+        <span class="meta"></span>
+      </div>
+      {% endif %}
+    </div>
+  </div>
+
+  <!-- 오른쪽: 큐 + 강력매수 + 실행이력 세로 스택 -->
+  <div class="col-lg-4">
+    <div class="panel mb-2">
+      <div class="panel-head">
+        <h6>🟢 강력매수 누계</h6>
+        <span class="meta">{{ strong_reports|length }}건</span>
+      </div>
+      <div class="panel-body panel-scroll">
+        <table class="table compact">
+          <thead><tr><th>종목</th><th class="text-end">★</th><th></th></tr></thead>
+          <tbody>
+          {% for r in strong_reports %}
+            <tr>
+              <td><a href="/ticker/{{ r.ticker }}" class="name text-decoration-none" title="이 종목의 모든 보고서 보기">{{ r.name }}</a>
+                  <div class="muted mono small">{{ r.ticker }} · {{ r.week_label }}</div></td>
+              <td class="text-end mono">{{ "%.2f"|format(r.avg_rating) }}</td>
+              <td><a href="/report/{{ r.id }}" class="muted">→</a></td>
+            </tr>
+          {% else %}
+            <tr><td colspan="3" class="text-center muted py-4">아직 STRONG 없음</td></tr>
+          {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <div class="panel">
+      <div class="panel-head">
+        <h6>📅 실행 이력</h6>
+        <span class="meta">최근 5건</span>
+      </div>
+      <div class="panel-body panel-scroll">
+        <table class="table compact">
+          <thead><tr><th>#</th><th>주차</th><th>상태</th><th>최고</th></tr></thead>
+          <tbody>
+          {% for r in runs %}
+            <tr>
+              <td><a href="/run/{{ r.id }}" class="mono">#{{ r.id }}</a></td>
+              <td class="muted mono">{{ r.week_label }}</td>
+              <td><span class="muted">{{ r.status }}</span></td>
+              <td>{% if r.best_grade %}<span class="grade-pill grade-{{ r.best_grade }}">{{ r.best_grade }}</span>{% else %}<span class="muted">-</span>{% endif %}</td>
+            </tr>
+          {% else %}
+            <tr><td colspan="4" class="text-center muted py-4">이력 없음</td></tr>
+          {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- 우측 하단 fixed 큐 위젯 -->
+{% if queue_items %}
+<div class="queue-floating" id="queue-widget">
+  <div class="panel-head">
+    <h6>🗂 큐 <span class="meta">({{ queue_items|length }})</span></h6>
+    <button class="toggle-btn" onclick="document.getElementById('queue-widget').classList.toggle('collapsed')">▾</button>
+  </div>
+  <div class="panel-body">
+    <table class="table compact">
+      <tbody>
+      {% for q in queue_items %}
+        <tr>
+          <td style="width: 80px;">
+            {% if q.status == 'pending' and q.attempts and q.attempts > 0 %}
+              <span class="queue-status queue-retry" title="{{ q.last_error or '' }}">재시도 {{ q.attempts }}</span>
+            {% elif q.status == 'failed' %}
+              <span class="queue-status queue-failed" title="{{ q.last_error or '' }}">실패 {{ q.attempts }}</span>
+            {% else %}
+              <span class="queue-status queue-{{ q.status }}">{{ q.status }}</span>
+            {% endif %}
+          </td>
+          <td>{{ q.name or q.ticker }}</td>
+          <td class="text-end" style="width: 20px;">
+            <form method="post" action="/queue/{{ q.id }}/delete" style="margin:0"
+                  onsubmit="return confirm('큐에서 삭제하시겠어요?\n{{ q.name or q.ticker }} ({{ q.ticker }}) · {{ q.status }}');">
+              <button class="btn btn-sm btn-link p-0 muted">×</button>
+            </form>
+          </td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+{% endif %}
+{% endblock %}
