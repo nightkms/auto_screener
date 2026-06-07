@@ -1,21 +1,33 @@
 {% extends "base.html" %}
 {% block body %}
 
-{% if hot_flash is not none %}
-  {% if hot_flash|int == 0 %}
-    <div class="alert alert-warning py-2 small">⚠ 큐에 추가된 종목 없음 — 검색 상위 + 시총 상위 후보 모두 최근 30일 이내 분석 이력이 있어 dedup에 걸렸습니다. 시간이 지나 dedup이 풀리면 자연히 추가됩니다.</div>
-  {% else %}
-    <div class="alert alert-success py-2 small">▶ 핫 종목 {{ hot_flash }}개 큐에 추가됨. 워커가 1개씩 분석합니다.</div>
+{% if hot_flash is not none or err_flash or queued_flash or dup_flash %}
+<script>
+(function () {
+  {% if hot_flash is not none %}
+    {% if hot_flash|int == 0 %}
+      showToast('⚠ 큐에 추가된 종목 없음 — 검색·시총 상위 후보가 모두 최근 30일 dedup에 걸렸습니다. 시간이 지나면 자연히 추가됩니다.', 'warning');
+    {% else %}
+      showToast('▶ 핫 종목 ' + {{ hot_flash|tojson }} + '개 큐에 추가됨. 워커가 1개씩 분석합니다.', 'success');
+    {% endif %}
   {% endif %}
-{% endif %}
-{% if err_flash %}
-  <div class="alert alert-danger py-2 small">❌ 오류: {{ err_flash }} (logs/screener.err.log 확인)</div>
-{% endif %}
-{% if queued_flash %}
-  <div class="alert alert-success py-2 small">✓ 큐에 추가: <code>{{ queued_flash }}</code></div>
-{% endif %}
-{% if dup_flash %}
-  <div class="alert alert-warning py-2 small">⚠ <code>{{ dup_flash }}</code> 이미 큐에 있거나 잘못된 코드</div>
+  {% if err_flash %}
+    showToast('❌ 오류: ' + {{ err_flash|tojson }} + ' (logs/screener.err.log 확인)', 'danger');
+  {% endif %}
+  {% if queued_flash %}
+    showToast('✓ 큐에 추가: ' + {{ queued_flash|tojson }}, 'success');
+  {% endif %}
+  {% if dup_flash %}
+    showToast({{ dup_flash|tojson }} + ' 이미 큐에 있거나 잘못된 코드', 'warning');
+  {% endif %}
+  // 표시 후 URL에서 플래시 파라미터 제거 → 10초 자동 새로고침 때 토스트 재등장 방지
+  if (window.history && history.replaceState) {
+    const u = new URL(window.location);
+    ['hot', 'err', 'queued', 'dup'].forEach(k => u.searchParams.delete(k));
+    history.replaceState(null, '', u.pathname + u.search + u.hash);
+  }
+})();
+</script>
 {% endif %}
 {% if queue_items %}
   <meta http-equiv="refresh" content="10">

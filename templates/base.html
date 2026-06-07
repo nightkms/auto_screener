@@ -115,7 +115,7 @@
 
     /* 우측 하단 floating 큐 위젯 */
     .queue-floating {
-      position: fixed; bottom: 16px; right: 16px; width: 280px;
+      position: fixed; bottom: 16px; right: 16px; width: 360px;
       max-height: 50vh; background: var(--card);
       border: 1px solid var(--border); border-radius: 8px;
       box-shadow: 0 6px 20px rgba(0,0,0,.15);
@@ -129,7 +129,7 @@
     .queue-floating .panel-head h6 { color: #fff; }
     .queue-floating .panel-head .meta { color: #c0c5cd; }
     .queue-floating .panel-body { max-height: calc(50vh - 38px); overflow-y: auto; }
-    .queue-floating table.compact tbody td { padding: 4px 8px; font-size: 12px; }
+    .queue-floating table.compact tbody td { padding: 4px 8px; font-size: 12px; white-space: nowrap; }
     .queue-floating .toggle-btn {
       background: transparent; border: 0; color: #c0c5cd; cursor: pointer;
       font-size: 13px; padding: 0 4px;
@@ -156,6 +156,23 @@
     .grade-chip.grade-WATCH.active    { background: var(--watch);  border-color: var(--watch); }
     .grade-chip.grade-INTEREST.active { background: var(--interest); border-color: var(--interest); }
     .grade-chip.grade-SKIP.active     { background: var(--skip);   border-color: var(--skip); }
+
+    /* 토스트 알림 (좌측 하단, 3초 후 자동 소멸. 우측 하단 큐 위젯과 안 겹치게) */
+    .toast-stack {
+      position: fixed; bottom: 16px; left: 16px; z-index: 1080;
+      display: flex; flex-direction: column-reverse; gap: 8px;
+      max-width: min(92vw, 420px);
+    }
+    .toast-msg {
+      padding: 10px 14px; border-radius: 8px; font-size: 13px; color: #fff;
+      box-shadow: 0 6px 20px rgba(0,0,0,.18); word-break: break-all;
+      opacity: 0; transform: translateY(12px);
+      transition: opacity .25s ease, transform .25s ease;
+    }
+    .toast-msg.show    { opacity: 1; transform: translateY(0); }
+    .toast-success     { background: #16a34a; }
+    .toast-warning     { background: #d97706; }
+    .toast-danger      { background: #dc2626; }
   </style>
 </head>
 <body>
@@ -177,6 +194,24 @@
     </form>
   </div>
 </nav>
+<div class="toast-stack" id="toast-stack"></div>
+<script>
+// 토스트: 메시지 띄우고 3초 후 자동 소멸 (상단 알림을 대체).
+// block body 안의 호출보다 먼저 정의돼야 하므로 컨테이너 위에 둔다.
+window.showToast = function (message, type) {
+  const stack = document.getElementById('toast-stack');
+  if (!stack) return;
+  const el = document.createElement('div');
+  el.className = 'toast-msg toast-' + (type || 'success');
+  el.textContent = message;                 // textContent → XSS 안전
+  stack.appendChild(el);
+  requestAnimationFrame(() => el.classList.add('show'));
+  setTimeout(() => {
+    el.classList.remove('show');
+    setTimeout(() => el.remove(), 250);     // 페이드아웃 후 제거
+  }, 3000);
+};
+</script>
 <div class="container">{% block body %}{% endblock %}</div>
 
 <script>
