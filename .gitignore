@@ -17,3 +17,6 @@ logs/
 # 주의: _silence_console.py(scheduler.py가 import) 와 _get_pid.ps1(start_screener.bat 사용)은
 #       클론 후 실행에 필요하므로 추적함.
 _diag*.py
+
+# 포터블 메모리(개인 투자 성향·피드백·종목 메모). public repo에 올리지 않는다.
+memory/

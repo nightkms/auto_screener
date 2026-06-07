@@ -15,6 +15,18 @@
 
 사용자 대상 사용법·설치는 [README.md](README.md), 설계 근거는 [docs/design/](docs/design/) 참고.
 
+## 메모리 시스템 (자동 로드)
+
+@memory/MEMORY.md
+
+`memory/`는 포터블 컨텍스트다. 위 인덱스의 각 파일을 필요 시 Read 한다. 특히:
+
+- `memory/feedback_*.md` ← 작업 방식·응답 스타일·정책 (특히 [push 정책](memory/feedback_push_policy.md): push는 사용자 명시 요청 시에만)
+- `memory/howto_dart_document.md` ← DART 공시 원문(document API) 디코딩 노하우
+- `memory/project_auto_screener_github.md` ← 이 repo 발행 규칙
+
+주의: `memory/`는 개인 성향·피드백을 담으므로 **`.gitignore`로 제외**된다 (public repo 비노출).
+
 ## 빠른 시작
 
 ```sh
@@ -104,6 +116,11 @@ Windows 상주 백그라운드 기동은 `start_screener.bat`(→ `start_helper.
 ### selector
 - 검색상위 우선 → 부족분만 시총 보강, dedup 유지, **0건은 정상**.
   윈도우(30일)를 임의로 줄이지 말 것 → [selector](docs/design/selector.md).
+
+### 공시 수집
+- 제목만으론 호재/악재가 안 드러나는 공시(지분·주요사항 등)는 본문 원문을 받아 요약해
+  컨텍스트에 주입한다. 목록 증분 수집 + 요약 캐시로 비용을 줄인다.
+  document API(ZIP/XML)·ACODE 필드·대상 판정 → [dart-document](docs/design/dart-document.md).
 
 ### 분석 산출물 원칙
 - 한국어. 재무 수치는 백만원 단위 표.
