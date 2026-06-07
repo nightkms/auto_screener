@@ -298,6 +298,8 @@ async def _guarded_run_ticker(ticker: str, name: str = "",
 
 PRICE_ALERT_THRESHOLD_PCT = 5.0          # 기준가 대비 ±N% 변동 시 알림
 PRICE_WATCH_TTL_DAYS = 14                # 자동 만료
+PRICE_CHECK_HOUR = 18                     # 장 마감(시간외 단일가 포함)이라 그날 종가 확정 시각
+PRICE_CHECK_POLL_SEC = 3600              # 게이트 평가 주기(실제 체크는 평일 1회)
 
 
 async def _fetch_current_price(ticker: str) -> float | None:
@@ -319,11 +321,31 @@ async def _fetch_current_price(ticker: str) -> float | None:
 
 async def price_watch_worker():
     """STRONG/WATCH 종목의 기준가 대비 ±5% 변동 시 텔레그램 알림.
-    1시간마다 polling, 알림 발생하면 last_alert_pct 갱신해 같은 임계 반복 방지."""
+
+    주가는 평일 장 마감(시간외 단일가 포함, ~18시) 후에야 그날 종가가 확정되므로
+    **평일 하루 1회, 18시 이후**에만 체크한다. 매시간 polling은 불필요.
+
+    고정 시각 cron은 쓰지 않는다(호스트가 18시에 sleep이면 그 잡을 놓침,
+    runtime-assumptions 참고) — 대신 주기적으로 깨어나 "평일 & 18시 이후 &
+    오늘 아직 안 함"을 게이트로 검사한다. 18시에 꺼져 있다 늦게 깨어나도 그날
+    첫 평가에서 실행되므로 sleep/wake에 안전하다.
+    알림 발생 시 last_alert_pct 갱신해 같은 임계 반복 방지."""
     import notifier
-    log.info("price_watch_worker 시작")
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+    tz = ZoneInfo(config.TIMEZONE)
+    log.info("price_watch_worker 시작 (평일 %d시 이후 1회)", PRICE_CHECK_HOUR)
+    last_run_date = None
     while True:
         try:
+            now = datetime.now(tz)
+            # 게이트: 평일(월~금) & 마감 이후 & 오늘 아직 안 함
+            if not (now.weekday() < 5
+                    and now.hour >= PRICE_CHECK_HOUR
+                    and last_run_date != now.date()):
+                await asyncio.sleep(PRICE_CHECK_POLL_SEC)
+                continue
+            log.info("주가 워치 점검 (%s)", now.date())
             expired = storage.expire_old_watches(days=PRICE_WATCH_TTL_DAYS)
             if expired:
                 log.info("주가 워치 %d건 자동 만료 (>%d일)", expired, PRICE_WATCH_TTL_DAYS)
@@ -356,7 +378,8 @@ async def price_watch_worker():
                         log.warning("price alert send fail: %s", e)
                 else:
                     storage.update_watch(w["id"])
-            await asyncio.sleep(3600)        # 1시간
+            last_run_date = now.date()       # 오늘 체크 완료 표시
+            await asyncio.sleep(PRICE_CHECK_POLL_SEC)
         except asyncio.CancelledError:
             log.info("price_watch_worker 취소됨")
             raise
