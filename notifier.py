@@ -199,7 +199,7 @@ async def notify_run(run_id: int) -> bool:
                 await asyncio.sleep(RATE_GAP)
 
         # 3) 마무리
-        url = config.dashboard_url(f"/run/{run_id}")
+        url = config.dashboard_url("/")          # run 상세 페이지 제거 → 대시보드 홈
         tail = f"✅ 분석 완료. 자세히 보기: {url}"
         await _send(session, tail)
     return True
@@ -263,7 +263,7 @@ async def notify_run_summary(run_id: int) -> bool:
     for r in reports:
         if r["grade"] in counts:
             counts[r["grade"]] += 1
-    url = config.dashboard_url(f"/run/{run_id}")
+    url = config.dashboard_url("/")          # run 상세 페이지 제거 → 대시보드 홈
     text = (
         f"✅ 분석 완료 — {run['week_label']} run #{run_id}\n"
         f"총 {len(reports)}건 — "

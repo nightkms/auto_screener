@@ -2,8 +2,7 @@
 S8: FastAPI 대시보드.
 
 - /            전체 실행 이력 + 토큰 누계
-- /run/{id}    선정 후보 + 분석 결과 + 서브에이전트 점수
-- /report/{id} 종목 보고서 마크다운 뷰
+- /report/{id} 종목 보고서 마크다운 뷰 + 공시 본문요약 패널
 - POST /trigger  수동으로 pipeline.run_once() 즉시 실행 (별도 task)
 
 scheduler.py가 이 앱과 같은 프로세스에서 BackgroundScheduler를 띄운다.
@@ -26,6 +25,7 @@ import data_loader
 import pipeline
 import report_chat
 import storage
+import ticker_archive
 
 log = logging.getLogger("dashboard")
 
@@ -165,20 +165,6 @@ async def report_delete(report_id: int, request: Request):
     return RedirectResponse(url=next_url, status_code=303)
 
 
-@app.get("/run/{run_id}", response_class=HTMLResponse)
-async def run_detail(request: Request, run_id: int):
-    runs = storage.recent_runs(limit=200)
-    run = next((r for r in runs if r["id"] == run_id), None)
-    if not run:
-        raise HTTPException(404, "Run not found")
-    reports = [_enrich_report(r) for r in storage.reports_for_run(run_id)]
-    candidates = storage.candidates_for_run(run_id)
-    return templates.TemplateResponse(
-        request, "run.html",
-        {"run": run, "reports": reports, "candidates": candidates},
-    )
-
-
 @app.get("/ticker/{ticker}", response_class=HTMLResponse)
 async def ticker_history(request: Request, ticker: str):
     """동일 종목의 보고서 이력 — 등급/★/서브 별점이 어떻게 변했는지 추적."""
@@ -222,9 +208,19 @@ async def report_view(request: Request, report_id: int):
     if rep.get("md_path") and Path(rep["md_path"]).exists():
         md = Path(rep["md_path"]).read_text(encoding="utf-8")
     qa_history = storage.list_qa_messages(report_id)
+    # 이 종목의 누적 공시(본문요약 포함)를 최신순으로. 캐시 jsonl 기반이라 가볍다.
+    disclosures: list[dict] = []
+    try:
+        raw = ticker_archive.read_disclosure_summaries(
+            rep["ticker"], rep.get("name", ""))
+        disclosures = sorted(
+            raw.values(), key=lambda d: d.get("date") or "", reverse=True)
+    except Exception as e:
+        log.warning("[%s] 보고서 공시 로드 실패: %s", rep.get("ticker"), e)
     return templates.TemplateResponse(
         request, "report.html",
-        {"report": rep, "markdown": md, "qa_history": qa_history},
+        {"report": rep, "markdown": md, "qa_history": qa_history,
+         "disclosures": disclosures},
     )
 
 
