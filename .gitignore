@@ -8,6 +8,8 @@ data/*.db-journal
 data/cache/
 data/screener.pid
 logs/
+# 분석 산출물(보고서 .md + 종목별 공시·재무 캐시) — 생성 데이터라 추적 안 함
+analysis/
 .pytest_cache/
 *.egg-info/
 .idea/

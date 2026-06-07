@@ -43,15 +43,34 @@ CLAUDE_SUB_MODEL = _opt("CLAUDE_SUB_MODEL", "claude-sonnet-4-6")
 CLAUDE_SYNTH_MODEL = _opt("CLAUDE_SYNTH_MODEL", "claude-opus-4-7")
 LOG_LEVEL = _opt("LOG_LEVEL", "INFO")
 
+# 모든 산출 데이터는 이 패키지 폴더(ROOT) 밑에 둔다 — 폴더째 옮겨도 데이터가 따라옴.
 DATA_DIR = ROOT / "data"
 DB_PATH = DATA_DIR / "screener.db"
-ANALYSIS_DIR = ROOT.parent / "analysis" / "auto"
-BY_TICKER_DIR = ROOT.parent / "analysis" / "by_ticker"
+ANALYSIS_DIR = ROOT / "analysis" / "auto"
+BY_TICKER_DIR = ROOT / "analysis" / "by_ticker"
+LOG_DIR = ROOT / "logs"
 PROMPTS_DIR = ROOT / "prompts"
 
 DATA_DIR.mkdir(exist_ok=True)
 ANALYSIS_DIR.mkdir(parents=True, exist_ok=True)
 BY_TICKER_DIR.mkdir(parents=True, exist_ok=True)
+LOG_DIR.mkdir(exist_ok=True)
+
+
+def resolve_report_md(md_path) -> Path:
+    """저장된 보고서 md 경로를 절대경로로 해석.
+    신규는 ANALYSIS_DIR 기준 **상대경로**로 저장돼 폴더를 통째로 옮겨도 안전하다.
+    구버전 절대경로도 받되, 그 위치에 파일이 없으면(=폴더 이동됨) 'auto/' 뒷부분을
+    현재 ANALYSIS_DIR에 재결합해 찾는다."""
+    p = Path(md_path)
+    if p.is_absolute():
+        if p.exists():
+            return p
+        parts = p.parts
+        if "auto" in parts:                       # ...\analysis\auto\<주차>\x.md
+            return ANALYSIS_DIR.joinpath(*parts[parts.index("auto") + 1:])
+        return p
+    return ANALYSIS_DIR / p
 
 
 def require_telegram() -> tuple[str, str]:

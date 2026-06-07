@@ -475,7 +475,7 @@ def delete_report(report_id: int, delete_md: bool = True) -> dict | None:
         }
     if delete_md and row["md_path"]:
         try:
-            Path(row["md_path"]).unlink(missing_ok=True)
+            config.resolve_report_md(row["md_path"]).unlink(missing_ok=True)
         except Exception as e:
             log.warning("md_path 삭제 실패: %s — %s", row["md_path"], e)
     log.info("보고서 삭제: report=%d %s(%s)",
@@ -562,6 +562,37 @@ def recently_analyzed_tickers(days: int = 30) -> set[str]:
             (threshold,),
         ).fetchall()
     return {r["ticker"] for r in rows}
+
+
+def period_stats(days: int = 30) -> dict:
+    """최근 N일(runs.started_at 기준) 실행 수·등급 누계 + 토큰 합계.
+    대시보드 상단 통계 카드용. recently_analyzed_tickers와 같은 30일 윈도우 공유
+    ('한 달치' 기준). 시간당 실행이라 '최근 N회'로는 하루치밖에 안 잡혀 날짜 기준 사용."""
+    threshold = (datetime.now() - timedelta(days=days)).isoformat(timespec="seconds")
+    with _connect() as c:
+        runs = c.execute(
+            "SELECT COUNT(*) FROM runs WHERE started_at >= ?", (threshold,),
+        ).fetchone()[0]
+        grade_rows = c.execute(
+            """SELECT r.grade AS g, COUNT(*) AS n FROM reports r
+               JOIN runs ON r.run_id = runs.id
+               WHERE runs.started_at >= ? GROUP BY r.grade""",
+            (threshold,),
+        ).fetchall()
+        grades = {row["g"]: row["n"] for row in grade_rows}
+        tok = c.execute(
+            """SELECT COALESCE(SUM(tokens_in), 0), COALESCE(SUM(tokens_out), 0)
+               FROM usage_log WHERE timestamp >= ?""",
+            (threshold,),
+        ).fetchone()
+    return {
+        "days": days,
+        "runs": runs,
+        "strong": grades.get("STRONG", 0),
+        "watch": grades.get("WATCH", 0),
+        "tokens_in": tok[0] or 0,
+        "tokens_out": tok[1] or 0,
+    }
 
 
 def strong_reports(limit: int = 50) -> list[dict]:

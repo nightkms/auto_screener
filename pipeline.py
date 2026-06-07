@@ -43,7 +43,8 @@ def _save_markdown(run_label: str, report: synthesizer.FinalReport) -> str:
     safe = "".join(c for c in report.name if c not in r'\/:*?"<>|').strip()
     path = week_dir / f"{safe}_{report.ticker}.md"
     path.write_text(report.markdown, encoding="utf-8")
-    return str(path.resolve())
+    # ANALYSIS_DIR 기준 상대경로로 저장 → 폴더를 통째로 옮겨도 보고서가 열림.
+    return path.relative_to(config.ANALYSIS_DIR).as_posix()
 
 
 async def run_once(top_n: int = config.TOP_N,

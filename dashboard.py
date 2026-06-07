@@ -66,18 +66,15 @@ def _enrich_report(r: dict) -> dict:
 @app.get("/", response_class=HTMLResponse)
 async def index(request: Request):
     storage.init_db()
-    runs = [_enrich_run(r) for r in storage.recent_runs(limit=30)]
-    all_reps: list[dict] = []
-    for r in runs:
-        all_reps.extend(storage.reports_for_run(r["id"]))
-    usage = storage.usage_summary(run_ids=[r["id"] for r in runs])
-    total_in = sum(v["in"] or 0 for v in usage.values())
-    total_out = sum(v["out"] or 0 for v in usage.values())
+    runs = [_enrich_run(r) for r in storage.recent_runs(limit=5)]   # 실행 이력 패널용
+    # 상단 통계: '최근 30회'가 아니라 '최근 30일'(재분석 dedup 윈도우와 동일) 기준
+    ps = storage.period_stats(days=30)
     stats = {
-        "runs": len(runs),
-        "strong": sum(1 for r in all_reps if r["grade"] == "STRONG"),
-        "watch": sum(1 for r in all_reps if r["grade"] == "WATCH"),
-        "tokens_total": f"{(total_in + total_out):,}",
+        "days": ps["days"],
+        "runs": ps["runs"],
+        "strong": ps["strong"],
+        "watch": ps["watch"],
+        "tokens_total": f"{(ps['tokens_in'] + ps['tokens_out']):,}",
     }
     strong = storage.strong_reports(limit=30)
     queue_active = storage.queue_items(
@@ -205,8 +202,10 @@ async def report_view(request: Request, report_id: int):
         raise HTTPException(404, "Report not found")
     rep = dict(row)
     md = ""
-    if rep.get("md_path") and Path(rep["md_path"]).exists():
-        md = Path(rep["md_path"]).read_text(encoding="utf-8")
+    if rep.get("md_path"):
+        mp = config.resolve_report_md(rep["md_path"])
+        if mp.exists():
+            md = mp.read_text(encoding="utf-8")
     qa_history = storage.list_qa_messages(report_id)
     # 이 종목의 누적 공시(본문요약 포함)를 최신순으로. 캐시 jsonl 기반이라 가볍다.
     disclosures: list[dict] = []

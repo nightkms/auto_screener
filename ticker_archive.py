@@ -79,6 +79,8 @@ def save_run_report(ticker: str, name: str, week_label: str,
                      md_source_path: str | Path) -> Path | None:
     """주차별 보고서 마크다운을 종목별 폴더로 복사. runs/<week>.md."""
     src = Path(md_source_path) if md_source_path else None
+    if src and not src.is_absolute():            # 신규는 ANALYSIS_DIR 기준 상대경로
+        src = config.resolve_report_md(str(md_source_path))
     if not src or not src.exists():
         return None
     folder = ticker_dir(ticker, name) / "runs"
