@@ -36,7 +36,12 @@ SCORE_WEIGHTS = {"return": 0.45, "value_surge": 0.35, "foreign_delta": 0.20}
 LASTSEARCH_TOP_N = 30  # 네이버 검색 상위 페이지에서 가져올 종목 수 (1차 풀)
 MOVERS_TOP_N = 30      # 상한가·거래량 급증 등 시세 리스트에서 가져올 종목 수 (1.5차 보강)
 
-EXCLUDE_NAME_PAT = re.compile(r"(스팩|우선주|리츠|ETN|ETF|TIGER|KODEX|HANARO|RISE|ARIRANG)")
+EXCLUDE_NAME_PAT = re.compile(r"(스팩|우선주|리츠|ETN|ETF)")
+# ETF 브랜드는 항상 종목명 맨 앞에 옴(예: "SOL AI반도체소부장", "KODEX 200").
+# 영문 회사명 오탐 방지를 위해 선두 + 단어경계로 anchor. 신규/구브랜드 모두 포함.
+ETF_BRAND_PAT = re.compile(
+    r"^(KODEX|TIGER|RISE|KBSTAR|ACE|KINDEX|SOL|PLUS|ARIRANG|HANARO|KOSEF|"
+    r"HK|WON|BNK|FOCUS|TIMEFOLIO|KIWOOM|히어로즈|마이다스|UNICORN|VITA|ITF)\b")
 EXCLUDE_NAME_SUFFIX = re.compile(r"(우|우B|우C|\(전환\))$")
 PRICE_MIN = 1000           # 동전주 컷
 
@@ -228,9 +233,53 @@ def _zscore(values: list[float]) -> list[float]:
 def _is_excluded(name: str) -> bool:
     if EXCLUDE_NAME_PAT.search(name):
         return True
+    if ETF_BRAND_PAT.search(name):
+        return True
     if EXCLUDE_NAME_SUFFIX.search(name):
         return True
     return False
+
+
+async def _fetch_stock_end_type(session: aiohttp.ClientSession,
+                                 code: str) -> str | None:
+    """네이버 basic API의 stockEndType('stock'|'etf'|'etn'...). 실패 시 None."""
+    url = f"https://m.stock.naver.com/api/stock/{code}/basic"
+    try:
+        async with session.get(url, timeout=aiohttp.ClientTimeout(total=10)) as r:
+            if r.status != 200:
+                return None
+            j = await r.json()
+            return j.get("stockEndType")
+    except Exception:
+        return None
+
+
+async def _confirm_not_etf(candidates: list[dict]) -> list[dict]:
+    """최종 후보 중 ETF/ETN을 basic API의 stockEndType으로 한 번 더 걸러낸다.
+
+    시총풀 후보는 이미 stockEndType으로 제외됐지만, 검색상위·상한가/거래량은
+    이름만 스크랩돼(타입 필드 없음) 이름 패턴을 빠져나간 ETF가 섞일 수 있다.
+    후보가 소수(top_n)라 호출 부담이 작다. 룰: 모자라도 강제로 안 채움."""
+    if not candidates:
+        return candidates
+    timeout = aiohttp.ClientTimeout(total=30)
+    async with aiohttp.ClientSession(headers=HEADERS, timeout=timeout) as session:
+        sem = asyncio.Semaphore(10)
+
+        async def _typ(code: str):
+            async with sem:
+                return code, await _fetch_stock_end_type(session, code)
+
+        types = dict(await asyncio.gather(
+            *[_typ(c["ticker"]) for c in candidates]))
+    kept = []
+    for c in candidates:
+        if types.get(c["ticker"]) in ("etf", "etn"):
+            log.info("ETF/ETN 최종 제외(stockEndType): %s (%s)",
+                     c.get("name"), c["ticker"])
+            continue
+        kept.append(c)
+    return kept
 
 
 # ---------------------------------------------------------------------------
@@ -280,10 +329,14 @@ async def select_top_async(top_n: int = config.TOP_N) -> list[Candidate]:
                 movers_hits.append({**hit, "source_tag": tag})
 
         # 시총 풀 → meta dict (이름·market). 필터(우선주/ETF) 적용.
+        # 시총 API는 항목마다 stockEndType('stock'|'etf'|'etn')을 주므로 추가 호출
+        # 없이 ETF/ETN을 정확히 걸러낸다(이름 패턴보다 견고). 이름 패턴은 병행 백업.
         meta: dict[str, dict] = {}
         for market, lst in (("KOSPI", kospi), ("KOSDAQ", kosdaq)):
             for s in lst:
                 code, name = s["itemCode"], s["stockName"]
+                if s.get("stockEndType") in ("etf", "etn"):
+                    continue
                 if _is_excluded(name):
                     continue
                 meta[code] = {"name": name, "market": market}
@@ -385,6 +438,8 @@ async def select_top_async(top_n: int = config.TOP_N) -> list[Candidate]:
                 break
 
     top = primary + extra
+    # 이름만 스크랩되는 검색상위·상한가/거래량 경로의 잔여 ETF를 최종 타입 확인으로 컷.
+    top = await _confirm_not_etf(top)
     log.info("선정 결과: 검색상위 %d + 상한가·거래량 %d + z-score 보강 %d = 총 %d개 "
              "(dedup 제외 %d종목)",
              n_search, n_movers, len(extra), len(top), len(exclude))
