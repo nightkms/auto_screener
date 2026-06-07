@@ -39,15 +39,6 @@ _trigger_running = False
 # ---------------------------------------------------------------------------
 # 헬퍼
 # ---------------------------------------------------------------------------
-def _enrich_run(r: dict) -> dict:
-    """run row에 best_grade 추가."""
-    reps = storage.reports_for_run(r["id"])
-    grades = [x["grade"] for x in reps if x["grade"]]
-    rank = {"STRONG": 3, "WATCH": 2, "INTEREST": 1, "SKIP": 0}
-    best = max(grades, key=lambda g: rank.get(g, -1)) if grades else None
-    return {**r, "best_grade": best}
-
-
 def _enrich_report(r: dict) -> dict:
     """report row에 sub_ratings 펼침."""
     import sqlite3
@@ -66,7 +57,6 @@ def _enrich_report(r: dict) -> dict:
 @app.get("/", response_class=HTMLResponse)
 async def index(request: Request):
     storage.init_db()
-    runs = [_enrich_run(r) for r in storage.recent_runs(limit=5)]   # 실행 이력 패널용
     # 상단 통계: '최근 30회'가 아니라 '최근 30일'(재분석 dedup 윈도우와 동일) 기준
     ps = storage.period_stats(days=30)
     stats = {
@@ -103,7 +93,7 @@ async def index(request: Request):
 
     return templates.TemplateResponse(
         request, "index.html",
-        {"runs": runs[:5], "stats": stats,
+        {"stats": stats,
          "strong_reports": strong,
          "recent_items": recent_items,
          "recent_page": page,

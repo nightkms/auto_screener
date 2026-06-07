@@ -254,25 +254,6 @@
     .pick-zscore { background: var(--interest-bg); color: #4b5563; }
     .pick-manual { background: #ecfdf5; color: #047857; }
 
-    /* ---- 우측 하단 floating 큐 위젯 ---- */
-    .queue-floating {
-      position: fixed; bottom: var(--sp-4); right: var(--sp-4); width: 360px;
-      max-height: 50vh; background: var(--card);
-      border: 1px solid var(--border-2); border-radius: var(--radius);
-      box-shadow: var(--shadow-pop); z-index: 1050; overflow: hidden;
-      display: flex; flex-direction: column;
-    }
-    .queue-floating .panel-head { background: #14171c; border-bottom: 0; }
-    .queue-floating .panel-head h6 { color: #fff; }
-    .queue-floating .panel-head .meta { color: #b8bdc6; }
-    .queue-floating .toggle-btn {
-      background: transparent; border: 0; color: #b8bdc6; cursor: pointer;
-      font-size: 13px; padding: 0 4px;
-    }
-    .queue-floating.collapsed .panel-body { display: none; }
-    .queue-floating table.compact tbody td { padding: 5px 8px;
-      font-size: var(--fs-meta); white-space: nowrap; }
-
     /* ---- 페이지네이션 ---- */
     .pagination { margin: 0; }
     .page-link { color: var(--ink-2); border-color: var(--border);

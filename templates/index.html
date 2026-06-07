@@ -138,9 +138,9 @@
       {% endif %}
     </div>
 
-    <!-- 오른쪽: 강력매수 + 실행이력 -->
+    <!-- 오른쪽: 강력매수 + 분석 큐 -->
     <div class="dash-col">
-      <div class="panel" style="flex: 1.4;">
+      <div class="panel" style="flex: 1.3;">
         <div class="panel-head">
           <h6>🟢 강력매수 누계</h6>
           <span class="meta">{{ strong_reports|length }}건</span>
@@ -164,78 +164,57 @@
         </div>
       </div>
 
+      <!-- 분석 큐 (실행이력 자리). 목록은 이 패널 안에서 스크롤 -->
       <div class="panel" style="flex: 1;">
         <div class="panel-head">
-          <h6>📅 실행 이력</h6>
-          <span class="meta">최근 5건</span>
+          <h6>🗂 분석 큐</h6>
+          <span class="meta">{{ queue_items|length }}건</span>
         </div>
         <div class="panel-body">
+          {% if queue_items %}
+          {% set pick_badges = {
+              'search':  ['🔍', '검색상위', 'pick-search'],
+              'upper':   ['🚀', '상한가',   'pick-upper'],
+              'quant':   ['🔥', '거래량급증', 'pick-quant'],
+              'z-score': ['📊', '일반',     'pick-zscore'],
+              'manual':  ['✍️', '수기',     'pick-manual'],
+              'telegram':['📩', '텔레그램',  'pick-manual'],
+          } %}
           <table class="compact">
-            <thead><tr><th>#</th><th>주차</th><th>상태</th><th>최고</th></tr></thead>
             <tbody>
-            {% for r in runs %}
+            {% for q in queue_items %}
+              {% set pb = pick_badges.get(q.pick_source) %}
               <tr>
-                <td class="mono muted">#{{ r.id }}</td>
-                <td class="muted mono">{{ r.week_label }}</td>
-                <td><span class="muted">{{ r.status }}</span></td>
-                <td>{% if r.best_grade %}<span class="grade-pill grade-{{ r.best_grade }}">{{ r.best_grade }}</span>{% else %}<span class="muted">-</span>{% endif %}</td>
+                <td style="width: 84px;">
+                  {% if q.status == 'pending' and q.attempts and q.attempts > 0 %}
+                    <span class="queue-status queue-retry" title="{{ q.last_error or '' }}">재시도 {{ q.attempts }}</span>
+                  {% elif q.status == 'failed' %}
+                    <span class="queue-status queue-failed" title="{{ q.last_error or '' }}">실패 {{ q.attempts }}</span>
+                  {% else %}
+                    <span class="queue-status queue-{{ q.status }}">{{ q.status }}</span>
+                  {% endif %}
+                </td>
+                <td>
+                  {{ q.name or q.ticker }}
+                  {% if pb %}<span class="pick-src {{ pb[2] }}" title="선정근거: {{ pb[1] }}">{{ pb[0] }} {{ pb[1] }}</span>{% endif %}
+                </td>
+                <td class="num" style="width: 24px;">
+                  <form method="post" action="/queue/{{ q.id }}/delete" style="margin:0"
+                        onsubmit="return confirm('큐에서 삭제하시겠어요?\n{{ q.name or q.ticker }} ({{ q.ticker }}) · {{ q.status }}');">
+                    <button class="btn btn-sm btn-link p-0 muted" style="border:0;">×</button>
+                  </form>
+                </td>
               </tr>
-            {% else %}
-              <tr><td colspan="4" class="empty">이력 없음</td></tr>
             {% endfor %}
             </tbody>
           </table>
+          {% else %}
+          <div class="empty">대기 중인 종목 없음</div>
+          {% endif %}
         </div>
       </div>
     </div>
   </div>
 </div>
 
-<!-- 우측 하단 fixed 큐 위젯 -->
-{% if queue_items %}
-<div class="queue-floating" id="queue-widget">
-  <div class="panel-head">
-    <h6>🗂 큐 <span class="meta">({{ queue_items|length }})</span></h6>
-    <button class="toggle-btn" onclick="document.getElementById('queue-widget').classList.toggle('collapsed')">▾</button>
-  </div>
-  <div class="panel-body">
-    {% set pick_badges = {
-        'search':  ['🔍', '검색상위', 'pick-search'],
-        'upper':   ['🚀', '상한가',   'pick-upper'],
-        'quant':   ['🔥', '거래량급증', 'pick-quant'],
-        'z-score': ['📊', '일반',     'pick-zscore'],
-        'manual':  ['✍️', '수기',     'pick-manual'],
-        'telegram':['📩', '텔레그램',  'pick-manual'],
-    } %}
-    <table class="compact">
-      <tbody>
-      {% for q in queue_items %}
-        {% set pb = pick_badges.get(q.pick_source) %}
-        <tr>
-          <td style="width: 84px;">
-            {% if q.status == 'pending' and q.attempts and q.attempts > 0 %}
-              <span class="queue-status queue-retry" title="{{ q.last_error or '' }}">재시도 {{ q.attempts }}</span>
-            {% elif q.status == 'failed' %}
-              <span class="queue-status queue-failed" title="{{ q.last_error or '' }}">실패 {{ q.attempts }}</span>
-            {% else %}
-              <span class="queue-status queue-{{ q.status }}">{{ q.status }}</span>
-            {% endif %}
-          </td>
-          <td>
-            {{ q.name or q.ticker }}
-            {% if pb %}<span class="pick-src {{ pb[2] }}" title="선정근거: {{ pb[1] }}">{{ pb[0] }} {{ pb[1] }}</span>{% endif %}
-          </td>
-          <td class="num" style="width: 24px;">
-            <form method="post" action="/queue/{{ q.id }}/delete" style="margin:0"
-                  onsubmit="return confirm('큐에서 삭제하시겠어요?\n{{ q.name or q.ticker }} ({{ q.ticker }}) · {{ q.status }}');">
-              <button class="btn btn-sm btn-link p-0 muted" style="border:0;">×</button>
-            </form>
-          </td>
-        </tr>
-      {% endfor %}
-      </tbody>
-    </table>
-  </div>
-</div>
-{% endif %}
 {% endblock %}
