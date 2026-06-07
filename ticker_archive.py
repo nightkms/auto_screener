@@ -126,6 +126,47 @@ def append_disclosures(ticker: str, name: str,
     return added, latest_no, latest_date
 
 
+def read_disclosure_summaries(ticker: str, name: str = "") -> dict[str, dict]:
+    """누적 공시 jsonl에서 rcept_no → row 맵을 읽는다.
+    이미 본문 요약(summary)이 붙은 공시는 재방문 시 LLM 재호출 없이 재사용한다.
+    summary 없는 옛 row도 포함해 반환하므로, 호출부에서 summary 유무로 판단할 것."""
+    folder = ticker_dir(ticker, name)
+    jsonl = folder / "dart_disclosures.jsonl"
+    out: dict[str, dict] = {}
+    if not jsonl.exists():
+        return out
+    with jsonl.open("r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                row = json.loads(line)
+            except Exception:
+                continue
+            no = row.get("rcept_no")
+            if no:
+                out[no] = row      # 같은 rcept_no면 뒤(최신 append)가 이김
+    return out
+
+
+def cache_disclosure_summaries(ticker: str, name: str,
+                                rows: list[dict]) -> int:
+    """본문 요약(summary)이 붙은 공시 row를 jsonl에 append.
+    append_disclosures와 달리 rcept_no 중복을 막지 않는다 — 옛 요약-미보유 row가
+    이미 있어도 새 요약 row를 덧붙여 read_disclosure_summaries(뒤가 이김)가 최신
+    요약을 집어가도록 한다. 같은 요약이 중복 누적되는 일은 호출부(캐시 히트 시 skip)가
+    막는다. 반환: 실제 append한 건수."""
+    rows = [r for r in rows if r.get("summary") and r.get("rcept_no")]
+    if not rows:
+        return 0
+    jsonl = ticker_dir(ticker, name) / "dart_disclosures.jsonl"
+    with jsonl.open("a", encoding="utf-8") as f:
+        for r in rows:
+            f.write(json.dumps(r, ensure_ascii=False) + "\n")
+    return len(rows)
+
+
 def save_financials_snapshot(ticker: str, name: str,
                               financials: dict[str, dict[str, float]]) -> None:
     """최신 재무 스냅샷을 단일 파일로 저장 (덮어쓰기)."""

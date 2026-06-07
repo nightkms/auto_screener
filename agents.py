@@ -30,6 +30,7 @@ from claude_agent_sdk import (
 import config
 import data_loader
 import selector
+import ticker_archive
 
 log = logging.getLogger("agents")
 
@@ -235,11 +236,18 @@ def _build_user_prompt(name: str, ticker: str, candidate: selector.Candidate,
                     cat = d.get("signal_category", "")
                     hint = "잠재위험" if lvl == "fatal" else "주목"
                     lines.append(f"- [{hint}/{cat}] {d['date']} {d['title']}")
+                    if d.get("summary"):
+                        s = d["summary"].replace("\n", " ").strip()
+                        lines.append(f"    ↳ 본문요약: {s}")
                 lines.append("")
             lines.append(f"## 최근 공시 (180일, {len(ctx.recent_disclosures)}건)")
+            lines.append("_↳ 본문요약이 있는 건은 제목이 아니라 요약(원문 기반)을 근거로 판단할 것._")
             for d in ctx.recent_disclosures[:20]:
                 tag = f"[{d.get('type','')}]" if d.get("type") else ""
                 lines.append(f"- {d['date']} {tag} {d['title']}")
+                if d.get("summary"):
+                    s = d["summary"].replace("\n", " ").strip()
+                    lines.append(f"    ↳ 본문요약: {s}")
             lines.append("")
 
     lines.append("위 컨텍스트만 사실로 사용하라. 부족하면 WebSearch로 보강.")
@@ -300,6 +308,106 @@ async def _run_one(sub_name: str, user_prompt: str,
     )
 
 
+# ---------------------------------------------------------------------------
+# 공시 본문 요약 (증분 캐시) — 제목만으로 호재/악재가 안 드러나는 공시를 위해.
+# 비싼 건 본문 fetch + LLM 요약이므로 그 결과만 캐시하고, 목록(list.json)은
+# 기존 정책대로 매번 180일 전체를 새로 받는다.
+# ---------------------------------------------------------------------------
+MAX_DOCS_PER_STOCK = 8           # 종목당 본문 fetch+요약 상한 (signal/최신 우선)
+DISCLOSURE_SUMMARY_TIMEOUT_S = 120
+
+_DISCLOSURE_SUMMARY_SYSTEM = (
+    "너는 한국 DART 공시 원문을 분석가용으로 압축하는 도구다. "
+    "주어진 공시 본문에서 투자 판단에 필요한 사실만 2~4문장으로 요약하라.\n"
+    "규칙:\n"
+    "- 공시일 시점의 사실만 적는다. 추측·전망·매수/매도 의견 금지.\n"
+    "- 누가/무엇을/얼마나(주식수·금액·지분율)/왜(사유)를 구체 수치로.\n"
+    "- 증여·담보·계약 건은 상대방과 목적(승계·자금조달 등)을 드러낸다.\n"
+    "- 본문에 없는 내용은 지어내지 말 것. 한국어로 답한다."
+)
+
+
+async def _summarize_document(d: dict, body: str, fields: dict) -> str:
+    """공시 원문 1건을 2~4문장으로 요약. 실패 시 빈 문자열."""
+    field_hint = ""
+    if fields:
+        field_hint = "\n".join(f"- {k}: {' / '.join(v)}"
+                               for k, v in fields.items())
+    prompt = (
+        f"공시 제목: {d.get('title','')}\n"
+        f"공시일: {d.get('date','')}\n"
+        f"유형: {d.get('type','')}\n"
+        f"접수번호: {d.get('rcept_no','')}\n"
+        + (f"\n[자동추출 핵심필드]\n{field_hint}\n" if field_hint else "")
+        + f"\n[본문]\n{body}\n\n위 공시를 규칙에 맞게 요약하라."
+    )
+    opts = ClaudeAgentOptions(
+        system_prompt=_DISCLOSURE_SUMMARY_SYSTEM,
+        model=config.CLAUDE_SUB_MODEL,
+        permission_mode="bypassPermissions",
+        allowed_tools=[],          # 본문만 보고 요약 (웹검색 불필요)
+        max_turns=1,
+    )
+    pieces: list[str] = []
+
+    async def _consume() -> None:
+        async for msg in query(prompt=prompt, options=opts):
+            if isinstance(msg, AssistantMessage):
+                for block in msg.content:
+                    if isinstance(block, TextBlock):
+                        pieces.append(block.text)
+
+    try:
+        await asyncio.wait_for(_consume(), timeout=DISCLOSURE_SUMMARY_TIMEOUT_S)
+    except Exception as e:
+        log.warning("공시 요약 실패 rcept=%s: %s", d.get("rcept_no"), e)
+        return ""
+    return "\n".join(pieces).strip()
+
+
+async def enrich_disclosures(ticker: str, name: str,
+                             disclosures: list[dict],
+                             max_docs: int = MAX_DOCS_PER_STOCK) -> int:
+    """recent_disclosures를 in-place 보강: 본문 요약(summary)을 붙인다.
+    1) 캐시(jsonl)에 summary 있는 rcept_no는 그대로 재사용 (LLM 재호출 없음).
+    2) 캐시에 없고 should_fetch_document 대상인 건만 본문 fetch + LLM 요약.
+    3) 새로 요약한 것만 jsonl에 캐시 (다음 회차 재사용).
+    반환: 새로 요약한 건수."""
+    if not disclosures:
+        return 0
+    cache = ticker_archive.read_disclosure_summaries(ticker, name)
+    # 1) 캐시 재사용
+    for d in disclosures:
+        cached = cache.get(d.get("rcept_no", ""))
+        if cached and cached.get("summary"):
+            d["summary"] = cached["summary"]
+
+    # 2) 미캐시 + 대상만 (recent_disclosures는 이미 signal/최신 우선 정렬)
+    todo = [d for d in disclosures
+            if not d.get("summary") and data_loader.should_fetch_document(d)]
+    todo = todo[:max_docs]
+    if not todo:
+        return 0
+    log.info("[%s] 공시 본문 요약 신규 대상 %d건", ticker, len(todo))
+
+    async def _one(d: dict) -> dict | None:
+        got = await asyncio.to_thread(data_loader.fetch_document, d["rcept_no"])
+        if not got:
+            return None
+        body, fields = got
+        summary = await _summarize_document(d, body, fields)
+        if not summary:
+            return None
+        d["summary"] = summary
+        return d
+
+    done = await asyncio.gather(*[_one(d) for d in todo])
+    newly = [d for d in done if d]
+    if newly:
+        ticker_archive.cache_disclosure_summaries(ticker, name, newly)
+    return len(newly)
+
+
 async def analyze_stock(candidate: selector.Candidate,
                         ctx: data_loader.StockContext | None,
                         prior_summary: str = "") -> StockAnalysis:
@@ -307,6 +415,15 @@ async def analyze_stock(candidate: selector.Candidate,
     prior_summary: 이전 회차 종합 보고서의 한 줄 결론. 같은 종목 재분석 시
     LLM이 등급 변동 사유를 명시할 수 있도록 컨텍스트로 주입."""
     name = ctx.name if ctx else candidate.name
+    # 5개 서브에이전트 전에 공시 본문을 요약해 컨텍스트에 주입 (증분 캐시).
+    if ctx and ctx.recent_disclosures:
+        try:
+            n = await enrich_disclosures(candidate.ticker, name,
+                                         ctx.recent_disclosures)
+            if n:
+                log.info("[%s] 공시 본문 요약 %d건 추가", candidate.ticker, n)
+        except Exception as e:
+            log.warning("[%s] 공시 본문 요약 실패: %s", candidate.ticker, e)
     user_prompt = _build_user_prompt(
         name, candidate.ticker, candidate, ctx,
         prior_summary=prior_summary,

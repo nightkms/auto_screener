@@ -404,9 +404,15 @@ def _fetch_disclosures(corp_code: str, days: int = 180,
         j = _api("list.json", **params)
         if j.get("status") != "000":
             continue
+        # 목록 API는 row에 pblntf_ty를 주지 않으므로, 어느 카테고리 필터로
+        # 받았는지(루프변수)로 유형을 판정한다. None(전체) 조회분은 일단 '기타'로
+        # 두고, 이후 B/C/D/I 조회에서 같은 rcept_no를 만나면 정확한 유형으로 보강.
+        cat_type = DISCLOSURE_TYPES.get(pblntf_ty, "기타") if pblntf_ty else None
         for r in j.get("list", []):
             no = r["rcept_no"]
             if no in all_rows:
+                if cat_type and all_rows[no]["type"] == "기타":
+                    all_rows[no]["type"] = cat_type
                 continue
             title = r["report_nm"]
             level, category = _classify_disclosure(title)
@@ -414,7 +420,7 @@ def _fetch_disclosures(corp_code: str, days: int = 180,
                 "date": r["rcept_dt"],
                 "title": title.strip(),
                 "rcept_no": no,
-                "type": DISCLOSURE_TYPES.get(r.get("pblntf_ty") or "", "기타"),
+                "type": cat_type or "기타",
                 "signal_level": level,        # fatal/warn/info 또는 None
                 "signal_category": category,  # 사업위기/거래/감사/자본/지배구조 등
             }
@@ -425,6 +431,118 @@ def _fetch_disclosures(corp_code: str, days: int = 180,
                          key=lambda r: (LEVEL_RANK[r["signal_level"]],
                                         -int(r["date"])))
     return sorted_rows[:60]
+
+
+# ---------------------------------------------------------------------------
+# 공시 원문(본문) 수집 — 제목만으로 호재/악재가 안 드러나는 공시를 위해.
+# 예: "주식등의 대량보유상황보고서(일반)" 제목 뒤에 실제로는
+#     "주식담보계약 및 주식증여계약 체결"(승계+자금조달)이 숨어 있음.
+# ---------------------------------------------------------------------------
+
+# 본문을 받아 요약할 가치가 있는 공시 유형 (DISCLOSURE_TYPES 라벨 기준)
+DOC_FETCH_TYPES = ("지분", "주요사항")
+
+# 유형 분류가 누락돼도(목록 API 한계) 제목으로 본문 대상을 잡기 위한 패턴.
+# 제목만으로는 호재/악재가 안 드러나는 지분·자본·구조변경 공시들.
+DOC_FETCH_TITLE_PATTERNS = (
+    "대량보유", "소유상황", "특정증권",          # 지분·증여·담보 (5%룰/임원주주)
+    "최대주주", "주식분할", "합병", "분할",
+    "유상증자", "무상증자", "전환사채", "신주인수권", "교환사채",
+    "감자", "주식교환", "영업양수", "영업양도", "자기주식",
+)
+
+
+def should_fetch_document(d: dict) -> bool:
+    """이 공시의 원문 본문을 받아 요약할 대상인지 판정.
+    - 지분(증여·대량보유)·주요사항: 제목만으로 호재/악재가 안 드러나 본문 필요.
+    - signal 키워드(fatal/warn)가 걸린 건: 맥락 확인 가치 있음.
+    - 위 유형 판정이 누락돼도 제목 패턴으로 한 번 더 거른다.
+    - 정기보고서(사업/분기)는 제외 — 실적은 fnlttSinglAcnt로 이미 구조화 수신하므로
+      방대한 본문을 받을 필요가 없다."""
+    if d.get("type") in DOC_FETCH_TYPES:
+        return True
+    if d.get("signal_level") in ("fatal", "warn"):
+        return True
+    title = d.get("title", "")
+    if any(p in title for p in DOC_FETCH_TITLE_PATTERNS):
+        return True
+    return False
+
+
+# ACODE → 사람이 읽는 라벨 (지분/대량보유/주요사항 공시의 핵심 셀)
+_DART_FIELD_LABELS = {
+    "RPT_RSP_NM": "보고자",
+    "SUM_CHN_RWN": "보고사유",
+    "CHN_RSM": "변경사유",
+    "CHN_RSN": "변동사유",
+    "TRD_RVL": "계약상대방",
+    "TRD_KND": "계약종류",
+    "TRD_RMK": "계약비고",
+}
+
+
+def _extract_dart_fields(xml: str) -> dict[str, list[str]]:
+    """DART 원문 XML에서 ACODE 기반 핵심필드 추출 (요약 보조·fallback용)."""
+    out: dict[str, list[str]] = {}
+    for code, label in _DART_FIELD_LABELS.items():
+        for m in re.finditer(rf'ACODE="{code}"[^>]*>([^<]*)<', xml):
+            v = m.group(1).strip()
+            if v and v != "-":
+                out.setdefault(label, [])
+                if v not in out[label]:
+                    out[label].append(v)
+    return out
+
+
+_TAG_ROW_END = re.compile(r"</T[RDEUH]>")
+_TAG_P = re.compile(r"</?P>")
+_TAG_ANY = re.compile(r"<[^>]+>")
+_WS_INLINE = re.compile(r"[ \t]+")
+_WS_NL = re.compile(r"\n\s*\n+")
+
+
+def _clean_dart_xml(xml: str) -> str:
+    """DART 원문 XML → 평문. 셀/행 경계만 공백·개행으로 남기고 태그 제거.
+    원본 50~110KB가 보통 4~9천자로 줄어 LLM 요약 입력으로 적합."""
+    s = _TAG_ROW_END.sub(" ", xml)
+    s = _TAG_P.sub("\n", s)
+    s = _TAG_ANY.sub("", s)
+    s = _WS_INLINE.sub(" ", s)
+    s = _WS_NL.sub("\n", s)
+    return s.strip()
+
+
+def fetch_document(rcept_no: str,
+                   max_chars: int = 12000) -> tuple[str, dict] | None:
+    """접수번호의 원문(document.xml)을 받아 (정제 평문, 핵심필드) 반환.
+    실패 시 None. document API는 ZIP 안에 '{rcept_no}.xml' 1개(UTF-8)를 준다."""
+    try:
+        r = requests.get(f"{DART_BASE}/document.xml",
+                         params={"crtfc_key": config.DART_API_KEY,
+                                 "rcept_no": rcept_no},
+                         timeout=30)
+        r.raise_for_status()
+    except Exception as e:
+        log.warning("document fetch 실패 rcept=%s: %s", rcept_no, e)
+        return None
+    try:
+        with zipfile.ZipFile(io.BytesIO(r.content)) as z:
+            names = z.namelist()
+            if not names:
+                return None
+            raw = z.read(names[0])
+    except zipfile.BadZipFile:
+        log.warning("document가 ZIP이 아님 rcept=%s", rcept_no)
+        return None
+    try:
+        xml = raw.decode("utf-8")
+    except UnicodeDecodeError:
+        xml = raw.decode("utf-8", errors="replace")
+    text = _clean_dart_xml(xml)
+    fields = _extract_dart_fields(xml)
+    if len(text) > max_chars:
+        text = text[:max_chars] + "\n…(이하 생략)"
+    return text, fields
 
 
 # ---------------------------------------------------------------------------
@@ -630,10 +748,65 @@ def fetch_market_snapshot() -> dict:
     return out
 
 
+DISCLOSURE_WINDOW_DAYS = 180        # 분석 컨텍스트에 유지하는 공시 기간
+
+
+def collect_disclosures_cached(ticker: str, name: str, corp: str,
+                               force_since: str | None = None) -> list[dict]:
+    """증분 공시 수집 + 과거 캐시 머지.
+
+    - 마지막 조회일(metadata.last_disclosure_scan_date) '그 날부터' 다시 조회한다
+      (하루 겹침). 오전에 조회한 뒤 같은 날 오후에 올라온 공시를 놓치지 않기 위함.
+      첫 방문이면 since=None → 180일 전체.
+    - DART 신규분 + jsonl 캐시(과거 전체)를 rcept_no로 머지하고 180일 이내로 컷한다.
+      → 매번 전체를 다시 받지 않아도 분석 컨텍스트에는 180일 공시가 다 들어간다.
+    - 신규 제목을 jsonl에 누적하고 last_disclosure_scan_date를 오늘로 갱신한다.
+    - summary(본문 요약)는 여기서 붙이지 않는다(LLM 단계 enrich 담당). 단 캐시에
+      이미 있던 summary는 머지에서 보존한다.
+    """
+    import ticker_archive  # 지연 import (data_loader ↔ ticker_archive 순환 방지)
+
+    meta = ticker_archive.read_metadata(ticker, name)
+    since = force_since or meta.get("last_disclosure_scan_date")
+    new_rows = _fetch_disclosures(corp, since=since)
+    log.info("[%s] 공시 증분 조회: since=%s → 신규/갱신 %d건",
+             ticker, since or "(첫 수집·180일)", len(new_rows))
+
+    cached = ticker_archive.read_disclosure_summaries(ticker, name)  # rcept_no→row
+    merged: dict[str, dict] = dict(cached)
+    for r in new_rows:
+        no = r["rcept_no"]
+        if no in merged:
+            keep_summary = merged[no].get("summary")
+            merged[no] = {**merged[no], **r}     # 최신 메타로 갱신
+            if keep_summary and not merged[no].get("summary"):
+                merged[no]["summary"] = keep_summary   # 캐시 요약 보존
+        else:
+            merged[no] = r
+
+    cutoff = (date.today() - timedelta(days=DISCLOSURE_WINDOW_DAYS)).strftime("%Y%m%d")
+    rows = [r for r in merged.values() if (r.get("date") or "0") >= cutoff]
+    LEVEL_RANK = {"fatal": 0, "warn": 1, "info": 2, None: 3}
+    rows.sort(key=lambda r: (LEVEL_RANK.get(r.get("signal_level"), 3),
+                             -int(r.get("date") or 0)))
+
+    # 신규 제목 누적(append-only, rcept_no dedup) + 마지막 조회일 갱신
+    try:
+        ticker_archive.append_disclosures(ticker, name, new_rows)
+        ticker_archive.write_metadata(
+            ticker, name,
+            last_disclosure_scan_date=date.today().strftime("%Y%m%d"))
+    except Exception as e:
+        log.warning("[%s] 공시 캐시 누적/메타 갱신 실패: %s", ticker, e)
+
+    return rows[:60]
+
+
 def load_context(ticker: str, years: int = 2,
                   since: str | None = None) -> StockContext | None:
-    """since가 'YYYYMMDD'면 그 날짜 이후 공시만 수집 (증분).
-    재무·발행물 등은 since 무관 최신 보고서를 받는다 (분기 단위라 항상 최신이 의미 있음).
+    """공시는 캐시 기반 증분 수집(collect_disclosures_cached). since를 주면 그 날짜를
+    강제 시작점으로 쓴다(보통은 metadata의 마지막 조회일을 자동 사용).
+    재무·발행물 등은 분기 단위라 항상 최신 보고서를 새로 받는다.
     """
     mapping = _load_corp_mapping()
     info = mapping.get(ticker)
@@ -641,13 +814,17 @@ def load_context(ticker: str, years: int = 2,
         log.warning("매핑 없음: %s", ticker)
         return None
     corp = info["corp_code"]
+
+    # 종목 표시명을 먼저 확정 (공시 캐시 폴더명에 필요)
+    display_name = info.get("name") if info.get("is_preferred") else info.get("corp_name", "")
+    if not display_name:
+        display_name = info.get("corp_name", "")
+
     company = _fetch_company(corp)
 
     financials = _fetch_financials_all(corp, years=years)
-    disclosures = _fetch_disclosures(corp, since=since)
-    if since:
-        log.info("[%s] 증분 공시 수집: since=%s → %d건",
-                 ticker, since, len(disclosures))
+    disclosures = collect_disclosures_cached(ticker, display_name, corp,
+                                             force_since=since)
 
     nav = _fetch_naver_integration(ticker)
     valuation = _parse_naver_valuation(nav)
@@ -674,11 +851,6 @@ def load_context(ticker: str, years: int = 2,
             "series": info.get("series", ""),
             "common_valuation": common_valuation,
         }
-
-    # 종목 표시명: 우선주면 네이버 이름(우선주 표기), 그 외 corp_name
-    display_name = info.get("name") if info.get("is_preferred") else info.get("corp_name", "")
-    if not display_name:
-        display_name = info.get("corp_name", "")
 
     return StockContext(
         ticker=ticker,
