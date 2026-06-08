@@ -293,12 +293,14 @@ async def _guarded_run(top_n: int):
 
 
 async def _guarded_run_ticker(ticker: str, name: str = "",
-                               source: str = "manual"):
+                               source: str = "manual",
+                               pick_source: str = "manual"):
     global _trigger_running
     _trigger_running = True
     try:
         return await pipeline.run_for_ticker(
             ticker, name=name, dry_run=False, source=source,
+            pick_source=pick_source,
         )
     finally:
         _trigger_running = False
@@ -423,12 +425,14 @@ async def queue_worker():
             ticker = item["ticker"]
             name = item.get("name") or ""
             source = item.get("source") or "manual"
-            log.info("queue: 처리 시작 qid=%d %s(%s) src=%s attempts=%d",
-                     qid, name, ticker, source, item["attempts"])
+            pick_source = item.get("pick_source") or "manual"
+            log.info("queue: 처리 시작 qid=%d %s(%s) src=%s pick=%s attempts=%d",
+                     qid, name, ticker, source, pick_source, item["attempts"])
             storage.mark_queue_processing(qid)
             try:
                 run_id = await _guarded_run_ticker(
                     ticker, name=name, source=source,
+                    pick_source=pick_source,
                 )
                 storage.mark_queue_done(qid, run_id=run_id)
                 log.info("queue: 완료 qid=%d run_id=%d", qid, run_id)

@@ -466,8 +466,11 @@ def select_top(top_n: int = config.TOP_N) -> list[Candidate]:
 
 
 async def fetch_single_candidate(ticker: str, name: str = "",
-                                  market: str = "") -> Candidate | None:
-    """단일 종목에 대한 Candidate 빌더. 큐 분석용 (selector 우회)."""
+                                  market: str = "",
+                                  pick_source: str = "manual") -> Candidate | None:
+    """단일 종목에 대한 Candidate 빌더. 큐 분석용 (selector 우회).
+    pick_source: 큐에 적재될 때의 선정근거(search/upper/quant/...). 분석 시
+    '오늘 상한가/거래량급증으로 잡힌 종목'임을 프롬프트에 알리는 데 쓴다."""
     timeout = aiohttp.ClientTimeout(total=30)
     async with aiohttp.ClientSession(headers=HEADERS, timeout=timeout) as session:
         today = date.today()
@@ -490,7 +493,7 @@ async def fetch_single_candidate(ticker: str, name: str = "",
         value_surge=round(m["value_surge"], 2),
         foreign_delta=round(m["foreign_delta"], 3),
         score=0.0,
-        source_tag="manual",
+        source_tag=pick_source or "manual",
     )
 
 

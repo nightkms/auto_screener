@@ -225,9 +225,12 @@ def _should_retry_analysis(analysis: agents.StockAnalysis) -> str:
 
 async def run_for_ticker(ticker: str, name: str = "",
                           dry_run: bool = False,
-                          source: str = "manual") -> int:
+                          source: str = "manual",
+                          pick_source: str = "manual") -> int:
     """단일 종목을 큐에서 받아 분석. selector 우회.
-    source: 'manual'/'auto_weekly'/'telegram' — 알림 정책 분기에 사용."""
+    source: 'manual'/'auto_weekly'/'telegram' — 알림 정책 분기에 사용.
+    pick_source: 선정근거(search/upper/quant/...). 상한가·거래량급증으로 잡힌
+    종목은 '오늘 왜 움직였는지'를 분석 프롬프트가 규명하도록 전달한다."""
     storage.init_db()
     week_label = _week_label()
     run_id = storage.create_run(
@@ -241,13 +244,15 @@ async def run_for_ticker(ticker: str, name: str = "",
     status = "success"
 
     try:
-        cand = await selector.fetch_single_candidate(ticker, name=name)
+        cand = await selector.fetch_single_candidate(
+            ticker, name=name, pick_source=pick_source)
         if cand is None:
             log.error("[%s] 시세 컨텍스트를 못 받음", ticker)
             cand = selector.Candidate(
                 ticker=ticker, name=name or ticker, market="?",
                 close=0, market_cap_billion=0,
                 weekly_return=0, value_surge=0, foreign_delta=0, score=0,
+                source_tag=pick_source or "manual",
             )
         storage.save_candidates(run_id, [cand.to_dict()])
 

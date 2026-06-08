@@ -108,6 +108,19 @@ def _build_user_prompt(name: str, ticker: str, candidate: selector.Candidate,
     lines.append(f"- 현재가(직전 종가): {candidate.close:,}원")
     lines.append("")
 
+    # 오늘 실제로 움직여서 선정된 종목(상한가·거래량급증)은 '당일 트리거' 규명이 핵심.
+    mover = {"upper": "상한가", "quant": "거래량 급증"}.get(candidate.source_tag or "")
+    if mover:
+        lines.append(f"## 🚨 당일 급등 종목 (선정 사유: 오늘 {mover})")
+        lines.append(f"- 이 종목은 **오늘(직전 거래일) {mover}**로 시세 리스트에 포착되어 "
+                     "분석 대상이 됐다.")
+        lines.append(f"- **반드시 '오늘 왜 {mover}가 나왔는지' 당일 트리거를 WebSearch로 "
+                     "규명하라**: 당일 공시·뉴스·테마/정책·수급(외국인·기관·개인) 중 무엇이 "
+                     "방아쇠였는지 구체적 사실로 짚을 것.")
+        lines.append("- 트리거를 못 찾으면 '당일 트리거 미확인'이라고 명시하고 추정 수위를 "
+                     "낮춰라 (지어내기 금지).")
+        lines.append("")
+
     # 우선주 분석 가이드 (본주와 같이 분석하라는 인라인 지시)
     pref = ctx.preferred_info if ctx and ctx.preferred_info else None
     if pref:

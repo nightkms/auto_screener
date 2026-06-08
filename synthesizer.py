@@ -94,6 +94,10 @@ def _build_synth_prompt(candidate: selector.Candidate,
     lines.append(f"- 주간 등락률: {candidate.weekly_return:+.2f}% / 거래대금 급증: {candidate.value_surge:.2f}배")
     lines.append(f"- 외인 보유율 변화: {candidate.foreign_delta:+.3f}%p")
     lines.append(f"- 분석일: {date.today().isoformat()}")
+    mover = {"upper": "상한가", "quant": "거래량 급증"}.get(candidate.source_tag or "")
+    if mover:
+        lines.append(f"- **선정 사유: 오늘 {mover}** → 카탈리스트 보고의 '당일 급등 "
+                     f"트리거'를 보고서에 `## 📈 오늘 {mover} 사유` 섹션으로 명시할 것.")
     lines.append("")
     if prior_summary:
         lines.append("## 📌 이전 회차 종합 요약 (변동 비교용)")

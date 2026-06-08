@@ -372,7 +372,15 @@ def queue_items(statuses: tuple[str, ...] | None = None,
         placeholders = ",".join("?" for _ in statuses)
         sql += f" WHERE status IN ({placeholders})"
         params = statuses
-    sql += " ORDER BY id DESC LIMIT ?"
+    # 표시 순서 = 실제 처리 순서: 처리중(현재 분석) → 대기(다음 처리, FIFO=id ASC) → 실패(휴면).
+    # next_queue_item()이 pending을 id ASC로 잡으므로 목록도 같은 순서로 보여야 직관적.
+    sql += """ ORDER BY CASE status
+                          WHEN 'processing' THEN 0
+                          WHEN 'pending'    THEN 1
+                          ELSE 2
+                        END,
+                        id ASC
+               LIMIT ?"""
     params = params + (limit,)
     with _connect() as c:
         return [dict(r) for r in c.execute(sql, params).fetchall()]
