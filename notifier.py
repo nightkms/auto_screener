@@ -188,7 +188,7 @@ async def notify_run(run_id: int) -> bool:
                 f"{emoji} {r['name']} ({r['ticker']})\n"
                 f"등급 {r['grade']} · 평균 ★ {r['avg_rating']}"
             )
-            md_path = Path(r["md_path"]) if r.get("md_path") else None
+            md_path = config.resolve_report_md(r["md_path"]) if r.get("md_path") else None
             if md_path and md_path.exists():
                 body = _strip_markdown(md_path.read_text(encoding="utf-8"))
             else:
@@ -237,7 +237,7 @@ async def notify_single_report(report_id: int,
         f"등급 {r['grade']} · 평균 ★ {r['avg_rating']}\n"
         f"보고서: {report_url}"
     )
-    md_path = Path(r["md_path"]) if r.get("md_path") else None
+    md_path = config.resolve_report_md(r["md_path"]) if r.get("md_path") else None
     if md_path and md_path.exists():
         body = _strip_markdown(md_path.read_text(encoding="utf-8"))
     else:

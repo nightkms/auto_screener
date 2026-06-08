@@ -1,7 +1,7 @@
 {% extends "base.html" %}
 {% block body %}
 
-{% if hot_flash is not none or err_flash or queued_flash or dup_flash %}
+{% if hot_flash is not none or err_flash or queued_flash or dup_flash or paused_flash or resumed_flash %}
 <script>
 (function () {
   {% if hot_flash is not none %}
@@ -20,10 +20,16 @@
   {% if dup_flash %}
     showToast({{ dup_flash|tojson }} + ' 이미 큐에 있거나 잘못된 코드', 'warning');
   {% endif %}
+  {% if paused_flash %}
+    showToast('⏸ 큐 일시정지됨 — 처리 중인 종목이 끝나면 idle 상태가 됩니다.', 'warning');
+  {% endif %}
+  {% if resumed_flash %}
+    showToast('▶ 큐 재개됨 — 다음 종목부터 분석을 다시 시작합니다.', 'success');
+  {% endif %}
   // 표시 후 URL에서 플래시 파라미터 제거 → 10초 자동 새로고침 때 토스트 재등장 방지
   if (window.history && history.replaceState) {
     const u = new URL(window.location);
-    ['hot', 'err', 'queued', 'dup'].forEach(k => u.searchParams.delete(k));
+    ['hot', 'err', 'queued', 'dup', 'paused', 'resumed'].forEach(k => u.searchParams.delete(k));
     history.replaceState(null, '', u.pathname + u.search + u.hash);
   }
 })();
@@ -167,10 +173,34 @@
       <!-- 분석 큐 (실행이력 자리). 목록은 이 패널 안에서 스크롤 -->
       <div class="panel" style="flex: 1;">
         <div class="panel-head">
-          <h6>🗂 분석 큐</h6>
-          <span class="meta">{{ queue_items|length }}건</span>
+          <h6>🗂 분석 큐
+            {% if queue_paused %}<span class="queue-status queue-failed" title="큐 일시정지 상태">⏸ 일시정지</span>{% endif %}
+          </h6>
+          <span class="meta" style="display:flex; align-items:center; gap:8px;">
+            {% if queue_processing %}<span title="현재 분석 중인 종목 수">▶ {{ queue_processing }} 처리중</span>{% endif %}
+            <span>{{ queue_items|length }}건</span>
+            {% if queue_paused %}
+              <form method="post" action="/queue/resume" style="margin:0">
+                <button class="btn btn-sm" type="submit" title="분석 재개">▶ 재개</button>
+              </form>
+            {% else %}
+              <form method="post" action="/queue/pause" style="margin:0">
+                <button class="btn btn-sm" type="submit" title="처리 중인 종목 완료 후 멈춤">⏸ 일시정지</button>
+              </form>
+            {% endif %}
+          </span>
         </div>
         <div class="panel-body">
+          {% if queue_paused %}
+          <div class="empty" style="margin-bottom:8px;
+               {% if not queue_processing %}color:#1a7f37;{% else %}color:#9a6700;{% endif %}">
+            {% if queue_processing %}
+              ⏸ 일시정지됨 — 현재 종목 분석 끝나는 중 ({{ queue_processing }}건). 끝나면 idle이 됩니다.
+            {% else %}
+              ⏸ 일시정지됨 · 처리 중 없음 — 지금 재시작해도 안전합니다.
+            {% endif %}
+          </div>
+          {% endif %}
           {% if queue_items %}
           {% set pick_badges = {
               'search':  ['🔍', '검색상위', 'pick-search'],

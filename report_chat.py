@@ -109,10 +109,10 @@ async def ask(report_id: int, question: str) -> ChatResult:
     if not row:
         return ChatResult(answer="", error=f"report {report_id} not found")
     report = dict(row)
-    md_path = report.get("md_path")
+    md_path = config.resolve_report_md(report["md_path"]) if report.get("md_path") else None
     report_md = ""
-    if md_path and Path(md_path).exists():
-        report_md = Path(md_path).read_text(encoding="utf-8")
+    if md_path and md_path.exists():
+        report_md = md_path.read_text(encoding="utf-8")
 
     history = storage.list_qa_messages(report_id)
     user_msg = _build_user_message(report, report_md, history, question)

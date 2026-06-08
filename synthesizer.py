@@ -37,6 +37,15 @@ Grade = Literal["STRONG", "WATCH", "INTEREST", "SKIP"]
 GRADE_PAT = re.compile(r"GRADE:\s*(STRONG|WATCH|INTEREST|SKIP)")
 GRADE_RANK = {"STRONG": 3, "WATCH": 2, "INTEREST": 1, "SKIP": 0}
 
+# Claude Max 구독 한도 초과 등 "회복 가능한" 실패 신호. 종합 응답이 분석이 아니라
+# 이런 안내문이면 보고서로 저장하면 안 되고(좀비 보고서), 큐가 다음에 재시도해야 한다.
+_LIMIT_PAT = re.compile(r"hit your limit|usage limit|rate limit|resets?\s+\d", re.I)
+
+
+def is_usage_limit(text: str) -> bool:
+    """한도 초과/리셋 안내문이 섞였는지. 종합·서브 결과 공통 판정에 쓴다."""
+    return bool(text and _LIMIT_PAT.search(text))
+
 
 @dataclass
 class FinalReport:
@@ -49,6 +58,7 @@ class FinalReport:
     tokens_in: int = 0
     tokens_out: int = 0
     elapsed_s: float = 0.0
+    ok: bool = True           # False면 종합 실패(한도초과 등) → 저장 금지·큐 재시도
 
 
 # ---------------------------------------------------------------------------
@@ -119,6 +129,7 @@ async def synthesize(candidate: selector.Candidate,
     started = time.time()
     pieces: list[str] = []
     tokens_in = tokens_out = 0
+    synth_failed = False
     try:
         async for msg in query(prompt=user_prompt, options=opts):
             if isinstance(msg, AssistantMessage):
@@ -133,6 +144,7 @@ async def synthesize(candidate: selector.Candidate,
                     tokens_out = usage.get("output_tokens") or 0
     except Exception as e:
         log.exception("[%s] 종합 실패", candidate.ticker)
+        synth_failed = True
         pieces.append(f"\n\n_종합 호출 실패: {e}_\n")
 
     markdown = "\n".join(pieces).strip()
@@ -142,12 +154,19 @@ async def synthesize(candidate: selector.Candidate,
     m = GRADE_PAT.search(markdown)
     grade: Grade = m.group(1) if m else _rule_grade(sub_ratings)  # type: ignore
 
+    # 종합이 예외로 끊겼거나, 본문이 비었거나, 한도초과 안내문이면 실패로 본다.
+    # → pipeline이 보고서를 저장하지 않고 큐에 재시도를 떠넘긴다(좀비 보고서 방지).
+    ok = not synth_failed and bool(markdown) and not is_usage_limit(markdown)
+    if not ok:
+        log.warning("[%s] 종합 결과 불완전(한도초과/실패) → 저장 보류", candidate.ticker)
+
     return FinalReport(
         ticker=candidate.ticker, name=analysis.name, grade=grade,
         avg_rating=avg, sub_ratings=sub_ratings,
         markdown=markdown,
         tokens_in=tokens_in, tokens_out=tokens_out,
         elapsed_s=round(time.time() - started, 1),
+        ok=ok,
     )
 
 

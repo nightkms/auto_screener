@@ -142,6 +142,11 @@ CREATE TABLE IF NOT EXISTS report_qa (
     created_at   TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_qa_report ON report_qa(report_id);
+
+CREATE TABLE IF NOT EXISTS app_state (
+    key   TEXT PRIMARY KEY,
+    value TEXT
+);
 """
 
 # 실패 분류는 사용하지 않는다 (모든 실패는 무한 retry, 정렬로만 우선순위 결정).
@@ -376,12 +381,12 @@ def queue_items(statuses: tuple[str, ...] | None = None,
 def next_queue_item() -> dict | None:
     """다음 처리할 항목. 'pending'만 잡음. 'failed'는 다음 정각의
     reset_failed_to_pending까지 휴면 → 즉시 재시도 방지.
-    정렬: attempts ASC → 재시도 적은 신규가 먼저, retry 종목은 자연히 뒤로."""
+    정렬: id ASC 순수 FIFO → 재시도 구분 없이 먼저 등록된 종목부터 처리."""
     with _connect() as c:
         row = c.execute(
             """SELECT * FROM analysis_queue
                WHERE status='pending'
-               ORDER BY attempts ASC, id ASC LIMIT 1"""
+               ORDER BY id ASC LIMIT 1"""
         ).fetchone()
         return dict(row) if row else None
 
@@ -441,6 +446,44 @@ def reset_stuck_queue() -> int:
             "UPDATE analysis_queue SET status='pending' WHERE status='processing'"
         )
         return cur.rowcount
+
+
+def processing_count() -> int:
+    """현재 'processing' 상태(워커가 실제 분석 중)인 큐 항목 수.
+    0이면 idle → 안전하게 재시작 가능."""
+    with _connect() as c:
+        return c.execute(
+            "SELECT COUNT(*) FROM analysis_queue WHERE status='processing'"
+        ).fetchone()[0]
+
+
+# ---------------------------------------------------------------------------
+# 앱 상태 (key-value). 큐 일시정지 같은 영속 플래그 보관.
+# ---------------------------------------------------------------------------
+def get_state(key: str, default: str | None = None) -> str | None:
+    with _connect() as c:
+        row = c.execute(
+            "SELECT value FROM app_state WHERE key=?", (key,)
+        ).fetchone()
+        return row[0] if row else default
+
+
+def set_state(key: str, value: str) -> None:
+    with _connect() as c:
+        c.execute(
+            """INSERT INTO app_state (key, value) VALUES (?, ?)
+               ON CONFLICT(key) DO UPDATE SET value=excluded.value""",
+            (key, value),
+        )
+
+
+def is_queue_paused() -> bool:
+    """큐 분석 일시정지 여부. 영속 → 재시작해도 유지."""
+    return get_state("queue_paused", "0") == "1"
+
+
+def set_queue_paused(paused: bool) -> None:
+    set_state("queue_paused", "1" if paused else "0")
 
 
 def delete_report(report_id: int, delete_md: bool = True) -> dict | None:

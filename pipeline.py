@@ -110,6 +110,11 @@ async def run_once(top_n: int = config.TOP_N,
                                   report.tokens_in, report.tokens_out,
                                   f"synth:{c.ticker}")
 
+                # 종합 실패/한도초과면 좀비 보고서를 저장하지 않고 이 종목은 건너뜀.
+                if not report.ok:
+                    log.warning("[%s] 종합 실패/한도초과 → 보고서 저장 skip", c.ticker)
+                    continue
+
                 md_path = _save_markdown(week_label, report)
                 sub_info = {
                     name: {
@@ -280,6 +285,11 @@ async def run_for_ticker(ticker: str, name: str = "",
         storage.log_usage(run_id, config.CLAUDE_SYNTH_MODEL,
                           report.tokens_in, report.tokens_out,
                           f"synth:{ticker}")
+
+        # 종합이 한도초과/실패면 점수만 있는 좀비 보고서를 저장하지 말고
+        # 큐에 재시도를 떠넘긴다(다음 정각 reset_failed_to_pending에서 재개).
+        if not report.ok:
+            raise RetryableAnalysisError(f"종합 실패/한도초과 → 큐 재시도 ({ticker})")
 
         md_path = _save_markdown(week_label, report)
         sub_info = {

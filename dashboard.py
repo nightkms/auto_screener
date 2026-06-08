@@ -69,6 +69,8 @@ async def index(request: Request):
     strong = storage.strong_reports(limit=30)
     queue_active = storage.queue_items(
         statuses=("pending", "processing", "failed"), limit=30)
+    queue_paused = storage.is_queue_paused()
+    queue_processing = storage.processing_count()
 
     try:
         page = max(1, int(request.query_params.get("page", "1")))
@@ -103,7 +105,11 @@ async def index(request: Request):
          "all_grades": list(VALID_GRADES),
          "search_q": q_raw,
          "queue_items": queue_active,
+         "queue_paused": queue_paused,
+         "queue_processing": queue_processing,
          "is_running": _trigger_running,
+         "paused_flash": request.query_params.get("paused") == "1",
+         "resumed_flash": request.query_params.get("resumed") == "1",
          "busy_flash": request.query_params.get("busy") == "1",
          "started_flash": request.query_params.get("started") == "1",
          "queued_flash": request.query_params.get("queued"),
@@ -130,6 +136,23 @@ async def queue_add(ticker: str = Form(...), name: str = Form("")):
     flash = "queued" if added else "dup"
     return RedirectResponse(
         url=f"/?{flash}={ticker}", status_code=303)
+
+
+@app.post("/queue/pause")
+async def queue_pause():
+    """큐 분석 일시정지. 처리 중인 종목은 끝까지 두고, 다음 종목부터 멈춤.
+    영속 상태라 재시작해도 유지 → 재기동 후 명시적 재개 전까지 분석 안 함."""
+    storage.set_queue_paused(True)
+    log.info("큐 일시정지 요청됨 (처리 중 항목 완료 후 idle)")
+    return RedirectResponse(url="/?paused=1", status_code=303)
+
+
+@app.post("/queue/resume")
+async def queue_resume():
+    """큐 분석 재개."""
+    storage.set_queue_paused(False)
+    log.info("큐 재개 요청됨")
+    return RedirectResponse(url="/?resumed=1", status_code=303)
 
 
 @app.post("/queue/{qid}/delete")
@@ -385,6 +408,11 @@ async def queue_worker():
     while True:
         try:
             if _trigger_running:
+                await asyncio.sleep(5)
+                continue
+            # 일시정지: 처리 중이던 종목은 위 try 블록에서 이미 끝났고,
+            # 여기서 다음 항목을 잡지 않으므로 곧 idle 상태가 된다 → 안전 재시작.
+            if storage.is_queue_paused():
                 await asyncio.sleep(5)
                 continue
             item = storage.next_queue_item()

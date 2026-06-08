@@ -36,6 +36,11 @@ log = logging.getLogger("scheduler")
 
 async def _scheduled_run():
     """매시각 정각: failed 큐 복귀 → 핫 종목 enqueue."""
+    # 일시정지 중이면 큐를 건드리지 않는다 (복귀·신규 enqueue 모두 스킵 →
+    # 재개 시 큐가 폭증하지 않게). 재시작해도 paused는 영속 유지된다.
+    if storage.is_queue_paused():
+        log.info("스케줄 트리거 스킵: 큐 일시정지 상태")
+        return
     log.info("스케줄 트리거: hourly reset + enqueue")
     try:
         rn = storage.reset_failed_to_pending()
