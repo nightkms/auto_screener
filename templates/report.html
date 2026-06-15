@@ -265,6 +265,9 @@
   if (!src || !out) return;
   if (window.marked) {
     marked.setOptions({ gfm: true, breaks: false });
+    // 취소선(~text~) 비활성화 — 한국어 보고서의 범위 물결표("4~5월", "8~12배")가
+    // GFM 취소선으로 오인돼 의도치 않게 줄이 그어지는 것을 막는다. 표/제목 등은 유지.
+    marked.use({ tokenizer: { del() {} } });
     out.innerHTML = marked.parse(src.textContent);
   } else {
     // CDN 로드 실패 시 raw 텍스트 폴백
