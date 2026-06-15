@@ -1,0 +1,22 @@
+{# 강력매수 누계 패널 내부. index.html과 /api/dashboard 부분갱신이 공유. #}
+<div class="panel-head">
+  <h6>🟢 강력매수 누계</h6>
+  <span class="meta">{{ strong_reports|length }}건</span>
+</div>
+<div class="panel-body">
+  <table class="compact">
+    <thead><tr><th>종목</th><th class="num">★</th><th></th></tr></thead>
+    <tbody>
+    {% for r in strong_reports %}
+      <tr>
+        <td><a href="/ticker/{{ r.ticker }}" class="name" title="이 종목의 모든 보고서 보기">{{ r.name }}</a>
+            <div class="muted mono">{{ r.ticker }} · {{ r.week_label }}</div></td>
+        <td class="num mono">{{ "%.2f"|format(r.avg_rating) }}</td>
+        <td><a href="/report/{{ r.id }}" class="muted">→</a></td>
+      </tr>
+    {% else %}
+      <tr><td colspan="3" class="empty">아직 STRONG 없음</td></tr>
+    {% endfor %}
+    </tbody>
+  </table>
+</div>

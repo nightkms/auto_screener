@@ -1,0 +1,5 @@
+{# 통계 카드 4개. index.html과 /api/dashboard 부분갱신이 공유. #}
+<div class="stat-card"><div class="stat-num">{{ stats.runs }}</div><div class="stat-label">최근 {{ stats.days }}일 실행</div></div>
+<div class="stat-card"><div class="stat-num" style="color: var(--strong)">{{ stats.strong }}</div><div class="stat-label">STRONG · {{ stats.days }}일</div></div>
+<div class="stat-card"><div class="stat-num" style="color: var(--watch)">{{ stats.watch }}</div><div class="stat-label">WATCH · {{ stats.days }}일</div></div>
+<div class="stat-card"><div class="stat-num">{{ stats.tokens_total }}</div><div class="stat-label">최근 {{ stats.days }}일 토큰</div></div>

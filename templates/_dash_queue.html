@@ -1,0 +1,61 @@
+{# 분석 큐 패널 내부. index.html과 /api/dashboard 부분갱신이 공유. #}
+<div class="panel-head">
+  <h6>🗂 분석 큐
+    {% if queue_paused %}<span class="queue-status queue-failed" title="큐 일시정지 상태">⏸ 일시정지</span>{% endif %}
+  </h6>
+  <span class="meta" style="display:flex; align-items:center; gap:8px;">
+    {% if queue_processing %}<span title="현재 분석 중인 종목 수">▶ {{ queue_processing }} 처리중</span>{% endif %}
+    <span>{{ queue_items|length }}건</span>
+    {% if queue_paused %}
+      <form method="post" action="/queue/resume" style="margin:0">
+        <button class="btn btn-sm" type="submit" title="분석 재개">▶ 재개</button>
+      </form>
+    {% else %}
+      <form method="post" action="/queue/pause" style="margin:0">
+        <button class="btn btn-sm" type="submit" title="처리 중인 종목 완료 후 멈춤">⏸ 일시정지</button>
+      </form>
+    {% endif %}
+  </span>
+</div>
+<div class="panel-body">
+  {% if queue_items %}
+  {% set pick_badges = {
+      'search':  ['🔍', '검색상위', 'pick-search'],
+      'upper':   ['🚀', '상한가',   'pick-upper'],
+      'quant':   ['🔥', '거래량급증', 'pick-quant'],
+      'z-score': ['📊', '일반',     'pick-zscore'],
+      'manual':  ['✍️', '수기',     'pick-manual'],
+      'telegram':['📩', '텔레그램',  'pick-manual'],
+  } %}
+  <table class="compact">
+    <tbody>
+    {% for q in queue_items %}
+      {% set pb = pick_badges.get(q.pick_source) %}
+      <tr>
+        <td style="width: 84px;">
+          {% if q.status == 'pending' and q.attempts and q.attempts > 0 %}
+            <span class="queue-status queue-retry" title="{{ q.last_error or '' }}">재시도 {{ q.attempts }}</span>
+          {% elif q.status == 'failed' %}
+            <span class="queue-status queue-failed" title="{{ q.last_error or '' }}">실패 {{ q.attempts }}</span>
+          {% else %}
+            <span class="queue-status queue-{{ q.status }}">{{ q.status }}</span>
+          {% endif %}
+        </td>
+        <td>
+          {{ q.name or q.ticker }}
+          {% if pb %}<span class="pick-src {{ pb[2] }}" title="선정근거: {{ pb[1] }}">{{ pb[0] }} {{ pb[1] }}</span>{% endif %}
+        </td>
+        <td class="num" style="width: 24px;">
+          <form method="post" action="/queue/{{ q.id }}/delete" style="margin:0"
+                onsubmit="return confirm('큐에서 삭제하시겠어요?\n{{ q.name or q.ticker }} ({{ q.ticker }}) · {{ q.status }}');">
+            <button class="btn btn-sm btn-link p-0 muted" style="border:0;">×</button>
+          </form>
+        </td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <div class="empty">대기 중인 종목 없음</div>
+  {% endif %}
+</div>

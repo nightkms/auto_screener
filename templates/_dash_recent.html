@@ -1,0 +1,92 @@
+{# 최근 분석 종목 패널 내부. index.html과 /api/dashboard 부분갱신이 공유. #}
+<div class="panel-head">
+  <h6>📊 최근 분석 종목</h6>
+  <span class="meta">{% if grade_filter %}{{ grade_filter|join(',') }} {% endif %}{% if search_q %}'{{ search_q }}' {% endif %}{{ recent_total }}건 · {{ recent_page }} / {{ recent_total_pages }}</span>
+</div>
+{# URL 빌더용 단편: grade와 q를 각각 query string 조각으로. #}
+{% set grade_qs = '' %}
+{% if grade_filter %}{% set grade_qs = '&grade=' + grade_filter|join('&grade=') %}{% endif %}
+{% set q_qs = '' %}
+{% if search_q %}{% set q_qs = '&q=' + search_q|urlencode %}{% endif %}
+<div class="grade-filter">
+  <a class="grade-chip {% if not grade_filter %}active{% endif %}"
+     href="?{% if q_qs %}{{ q_qs[1:] }}{% endif %}">전체</a>
+  {% for g in all_grades %}
+    {% set is_on = g in grade_filter %}
+    {% if is_on %}
+      {% set remaining = grade_filter|reject('equalto', g)|list %}
+      <a class="grade-chip grade-{{ g }} active"
+         href="?{% if remaining %}grade={{ remaining|join('&grade=') }}{% endif %}{{ q_qs }}">{{ g }} ×</a>
+    {% else %}
+      <a class="grade-chip grade-{{ g }}"
+         href="?{% if grade_filter %}grade={{ grade_filter|join('&grade=') }}&{% endif %}grade={{ g }}{{ q_qs }}">+ {{ g }}</a>
+    {% endif %}
+  {% endfor %}
+  <form method="get" action="/" class="grade-search d-inline-flex align-items-center" style="gap:.25rem;">
+    {% for g in grade_filter %}<input type="hidden" name="grade" value="{{ g }}">{% endfor %}
+    <input type="search" name="q" value="{{ search_q or '' }}"
+           placeholder="종목명/코드 검색" autocomplete="off"
+           onsearch="if (!this.value) this.form.submit();">
+    <button class="grade-chip" type="submit">검색</button>
+  </form>
+</div>
+<div class="panel-body">
+  <table class="compact">
+    <thead><tr>
+      <th>등급</th><th>종목</th><th class="num">★</th>
+      <th>주차</th><th>분석일</th><th></th><th></th>
+    </tr></thead>
+    <tbody>
+    {% for r in recent_items %}
+      <tr>
+        <td><span class="grade-pill grade-{{ r.grade }}">{{ r.grade }}</span></td>
+        <td><a href="/ticker/{{ r.ticker }}" class="name" title="이 종목의 모든 보고서 보기">{{ r.name }}</a>
+            <span class="muted ms-1 mono">{{ r.ticker }}</span></td>
+        <td class="num mono">{{ "%.2f"|format(r.avg_rating) }}</td>
+        <td class="muted mono">{{ r.week_label }}</td>
+        <td class="muted">{{ r.run_started[:16] }}</td>
+        <td><a href="/report/{{ r.id }}" class="muted">보고서 →</a></td>
+        <td class="num" style="width: 24px;">
+          <form method="post" action="/report/{{ r.id }}/delete?next=/?page={{ recent_page }}"
+                style="margin:0"
+                onsubmit="return confirm('보고서를 삭제하시겠어요?\n{{ r.name }} ({{ r.ticker }}) · ★{{ "%.2f"|format(r.avg_rating) }}\nDB row와 .md 파일이 함께 삭제됩니다.');">
+            <button class="btn btn-sm btn-link p-0 muted" title="보고서 삭제" style="border:0;">×</button>
+          </form>
+        </td>
+      </tr>
+    {% else %}
+      <tr><td colspan="7" class="empty">분석 결과 없음</td></tr>
+    {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% if recent_total_pages > 1 %}
+{% set filter_qs = grade_qs + q_qs %}
+<div class="panel-foot">
+  <nav>
+    <ul class="pagination pagination-sm mb-0">
+      <li class="page-item {% if recent_page <= 1 %}disabled{% endif %}">
+        <a class="page-link" href="?page={{ recent_page - 1 }}{{ filter_qs }}">‹</a>
+      </li>
+      {% set start = [1, recent_page - 3]|max %}
+      {% set end = [recent_total_pages, recent_page + 3]|min %}
+      {% if start > 1 %}
+        <li class="page-item"><a class="page-link" href="?page=1{{ filter_qs }}">1</a></li>
+        {% if start > 2 %}<li class="page-item disabled"><span class="page-link">…</span></li>{% endif %}
+      {% endif %}
+      {% for p in range(start, end + 1) %}
+        <li class="page-item {% if p == recent_page %}active{% endif %}">
+          <a class="page-link" href="?page={{ p }}{{ filter_qs }}">{{ p }}</a>
+        </li>
+      {% endfor %}
+      {% if end < recent_total_pages %}
+        {% if end < recent_total_pages - 1 %}<li class="page-item disabled"><span class="page-link">…</span></li>{% endif %}
+        <li class="page-item"><a class="page-link" href="?page={{ recent_total_pages }}{{ filter_qs }}">{{ recent_total_pages }}</a></li>
+      {% endif %}
+      <li class="page-item {% if recent_page >= recent_total_pages %}disabled{% endif %}">
+        <a class="page-link" href="?page={{ recent_page + 1 }}{{ filter_qs }}">›</a>
+      </li>
+    </ul>
+  </nav>
+</div>
+{% endif %}

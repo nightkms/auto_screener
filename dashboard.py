@@ -54,9 +54,10 @@ def _enrich_report(r: dict) -> dict:
 # ---------------------------------------------------------------------------
 # 라우트
 # ---------------------------------------------------------------------------
-@app.get("/", response_class=HTMLResponse)
-async def index(request: Request):
-    storage.init_db()
+def _build_dashboard_context(request: Request) -> dict[str, Any]:
+    """index와 부분 갱신(/api/dashboard)이 공유하는 동적 데이터 컨텍스트.
+
+    flash 메시지는 최초 페이지 로드에서만 의미가 있으므로 여기엔 넣지 않는다."""
     # 상단 통계: '최근 30회'가 아니라 '최근 30일'(재분석 dedup 윈도우와 동일) 기준
     ps = storage.period_stats(days=30)
     stats = {
@@ -93,30 +94,57 @@ async def index(request: Request):
     )
     recent_total_pages = max(1, (recent_total + per_page - 1) // per_page)
 
-    return templates.TemplateResponse(
-        request, "index.html",
-        {"stats": stats,
-         "strong_reports": strong,
-         "recent_items": recent_items,
-         "recent_page": page,
-         "recent_total_pages": recent_total_pages,
-         "recent_total": recent_total,
-         "grade_filter": list(grade_filter),
-         "all_grades": list(VALID_GRADES),
-         "search_q": q_raw,
-         "queue_items": queue_active,
-         "queue_paused": queue_paused,
-         "queue_processing": queue_processing,
-         "is_running": _trigger_running,
-         "paused_flash": request.query_params.get("paused") == "1",
-         "resumed_flash": request.query_params.get("resumed") == "1",
-         "busy_flash": request.query_params.get("busy") == "1",
-         "started_flash": request.query_params.get("started") == "1",
-         "queued_flash": request.query_params.get("queued"),
-         "dup_flash": request.query_params.get("dup"),
-         "hot_flash": request.query_params.get("hot"),
-         "err_flash": request.query_params.get("err")},
-    )
+    return {
+        "stats": stats,
+        "strong_reports": strong,
+        "recent_items": recent_items,
+        "recent_page": page,
+        "recent_total_pages": recent_total_pages,
+        "recent_total": recent_total,
+        "grade_filter": list(grade_filter),
+        "all_grades": list(VALID_GRADES),
+        "search_q": q_raw,
+        "queue_items": queue_active,
+        "queue_paused": queue_paused,
+        "queue_processing": queue_processing,
+        "is_running": _trigger_running,
+    }
+
+
+@app.get("/", response_class=HTMLResponse)
+async def index(request: Request):
+    storage.init_db()
+    ctx = _build_dashboard_context(request)
+    ctx.update({
+        "paused_flash": request.query_params.get("paused") == "1",
+        "resumed_flash": request.query_params.get("resumed") == "1",
+        "busy_flash": request.query_params.get("busy") == "1",
+        "started_flash": request.query_params.get("started") == "1",
+        "queued_flash": request.query_params.get("queued"),
+        "dup_flash": request.query_params.get("dup"),
+        "hot_flash": request.query_params.get("hot"),
+        "err_flash": request.query_params.get("err"),
+    })
+    return templates.TemplateResponse(request, "index.html", ctx)
+
+
+@app.get("/api/dashboard")
+async def api_dashboard(request: Request) -> JSONResponse:
+    """대시보드 동적 영역의 부분 HTML을 JSON으로 반환 (AJAX 폴링용).
+
+    index.html과 동일한 partial을 서버에서 렌더해 내려주므로 마크업이
+    중복되지 않는다. JS는 받은 HTML로 각 컨테이너 innerHTML만 교체한다."""
+    storage.init_db()
+    ctx = _build_dashboard_context(request)
+    env = templates.env
+    return JSONResponse({
+        "stats": env.get_template("_dash_stats.html").render(ctx),
+        "recent": env.get_template("_dash_recent.html").render(ctx),
+        "strong": env.get_template("_dash_strong.html").render(ctx),
+        "queue": env.get_template("_dash_queue.html").render(ctx),
+        "queue_count": len(ctx["queue_items"]),
+        "queue_processing": ctx["queue_processing"],
+    })
 
 
 @app.get("/api/search")

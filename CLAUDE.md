@@ -154,3 +154,6 @@ Windows 상주 백그라운드 기동은 `start_screener.bat`(→ `start_helper.
 - DART 단일계정 API는 일부 종목 당기순이익이 누락될 수 있다.
 - Windows에서 `pythonw` + VBS redirect 조합이 sleep/wake 후 로그를 0바이트로 남기는 경우가 있다.
 - `data/`·`logs/`·`.venv/`·`.env`는 gitignore 대상. 클론 직후엔 비어 있고 첫 실행 시 생성된다.
+- `*.bat`/`*.vbs`/`*.ps1`이 **LF(Unix) 줄바꿈**으로 저장되면 `cmd.exe`가 `.bat` 라인을 잘못 끊어
+  `'ta'`/`'er.pid'`/`'D' is not recognized` 류 에러로 기동이 실패한다(`start_screener.bat` 먹통).
+  `.gitattributes`가 `eol=crlf`로 강제하지만, 에디터가 LF로 덮어쓰면 재발 → 증상 보이면 줄바꿈부터 확인.

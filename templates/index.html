@@ -26,7 +26,7 @@
   {% if resumed_flash %}
     showToast('▶ 큐 재개됨 — 다음 종목부터 분석을 다시 시작합니다.', 'success');
   {% endif %}
-  // 표시 후 URL에서 플래시 파라미터 제거 → 10초 자동 새로고침 때 토스트 재등장 방지
+  // 표시 후 URL에서 플래시 파라미터 제거 → 부분 갱신과 무관하게 토스트 재등장 방지
   if (window.history && history.replaceState) {
     const u = new URL(window.location);
     ['hot', 'err', 'queued', 'dup', 'paused', 'resumed'].forEach(k => u.searchParams.delete(k));
@@ -35,206 +35,89 @@
 })();
 </script>
 {% endif %}
-{% if queue_items %}
-  <meta http-equiv="refresh" content="10">
-{% endif %}
 
 <div class="page">
   <!-- 통계 카드 -->
-  <div class="stat-row">
-    <div class="stat-card"><div class="stat-num">{{ stats.runs }}</div><div class="stat-label">최근 {{ stats.days }}일 실행</div></div>
-    <div class="stat-card"><div class="stat-num" style="color: var(--strong)">{{ stats.strong }}</div><div class="stat-label">STRONG · {{ stats.days }}일</div></div>
-    <div class="stat-card"><div class="stat-num" style="color: var(--watch)">{{ stats.watch }}</div><div class="stat-label">WATCH · {{ stats.days }}일</div></div>
-    <div class="stat-card"><div class="stat-num">{{ stats.tokens_total }}</div><div class="stat-label">최근 {{ stats.days }}일 토큰</div></div>
-  </div>
+  <div class="stat-row" id="dash-stats">{% include "_dash_stats.html" %}</div>
 
   <div class="dash-grid">
     <!-- 왼쪽: 최근 분석 (페이징) -->
-    <div class="panel">
-      <div class="panel-head">
-        <h6>📊 최근 분석 종목</h6>
-        <span class="meta">{% if grade_filter %}{{ grade_filter|join(',') }} {% endif %}{% if search_q %}'{{ search_q }}' {% endif %}{{ recent_total }}건 · {{ recent_page }} / {{ recent_total_pages }}</span>
-      </div>
-      {# URL 빌더용 단편: grade와 q를 각각 query string 조각으로. #}
-      {% set grade_qs = '' %}
-      {% if grade_filter %}{% set grade_qs = '&grade=' + grade_filter|join('&grade=') %}{% endif %}
-      {% set q_qs = '' %}
-      {% if search_q %}{% set q_qs = '&q=' + search_q|urlencode %}{% endif %}
-      <div class="grade-filter">
-        <a class="grade-chip {% if not grade_filter %}active{% endif %}"
-           href="?{% if q_qs %}{{ q_qs[1:] }}{% endif %}">전체</a>
-        {% for g in all_grades %}
-          {% set is_on = g in grade_filter %}
-          {% if is_on %}
-            {% set remaining = grade_filter|reject('equalto', g)|list %}
-            <a class="grade-chip grade-{{ g }} active"
-               href="?{% if remaining %}grade={{ remaining|join('&grade=') }}{% endif %}{{ q_qs }}">{{ g }} ×</a>
-          {% else %}
-            <a class="grade-chip grade-{{ g }}"
-               href="?{% if grade_filter %}grade={{ grade_filter|join('&grade=') }}&{% endif %}grade={{ g }}{{ q_qs }}">+ {{ g }}</a>
-          {% endif %}
-        {% endfor %}
-        <form method="get" action="/" class="grade-search d-inline-flex align-items-center" style="gap:.25rem;">
-          {% for g in grade_filter %}<input type="hidden" name="grade" value="{{ g }}">{% endfor %}
-          <input type="search" name="q" value="{{ search_q or '' }}"
-                 placeholder="종목명/코드 검색" autocomplete="off"
-                 onsearch="if (!this.value) this.form.submit();">
-          <button class="grade-chip" type="submit">검색</button>
-        </form>
-      </div>
-      <div class="panel-body">
-        <table class="compact">
-          <thead><tr>
-            <th>등급</th><th>종목</th><th class="num">★</th>
-            <th>주차</th><th>분석일</th><th></th><th></th>
-          </tr></thead>
-          <tbody>
-          {% for r in recent_items %}
-            <tr>
-              <td><span class="grade-pill grade-{{ r.grade }}">{{ r.grade }}</span></td>
-              <td><a href="/ticker/{{ r.ticker }}" class="name" title="이 종목의 모든 보고서 보기">{{ r.name }}</a>
-                  <span class="muted ms-1 mono">{{ r.ticker }}</span></td>
-              <td class="num mono">{{ "%.2f"|format(r.avg_rating) }}</td>
-              <td class="muted mono">{{ r.week_label }}</td>
-              <td class="muted">{{ r.run_started[:16] }}</td>
-              <td><a href="/report/{{ r.id }}" class="muted">보고서 →</a></td>
-              <td class="num" style="width: 24px;">
-                <form method="post" action="/report/{{ r.id }}/delete?next=/?page={{ recent_page }}"
-                      style="margin:0"
-                      onsubmit="return confirm('보고서를 삭제하시겠어요?\n{{ r.name }} ({{ r.ticker }}) · ★{{ "%.2f"|format(r.avg_rating) }}\nDB row와 .md 파일이 함께 삭제됩니다.');">
-                  <button class="btn btn-sm btn-link p-0 muted" title="보고서 삭제" style="border:0;">×</button>
-                </form>
-              </td>
-            </tr>
-          {% else %}
-            <tr><td colspan="7" class="empty">분석 결과 없음</td></tr>
-          {% endfor %}
-          </tbody>
-        </table>
-      </div>
-      {% if recent_total_pages > 1 %}
-      {% set filter_qs = grade_qs + q_qs %}
-      <div class="panel-foot">
-        <nav>
-          <ul class="pagination pagination-sm mb-0">
-            <li class="page-item {% if recent_page <= 1 %}disabled{% endif %}">
-              <a class="page-link" href="?page={{ recent_page - 1 }}{{ filter_qs }}">‹</a>
-            </li>
-            {% set start = [1, recent_page - 3]|max %}
-            {% set end = [recent_total_pages, recent_page + 3]|min %}
-            {% if start > 1 %}
-              <li class="page-item"><a class="page-link" href="?page=1{{ filter_qs }}">1</a></li>
-              {% if start > 2 %}<li class="page-item disabled"><span class="page-link">…</span></li>{% endif %}
-            {% endif %}
-            {% for p in range(start, end + 1) %}
-              <li class="page-item {% if p == recent_page %}active{% endif %}">
-                <a class="page-link" href="?page={{ p }}{{ filter_qs }}">{{ p }}</a>
-              </li>
-            {% endfor %}
-            {% if end < recent_total_pages %}
-              {% if end < recent_total_pages - 1 %}<li class="page-item disabled"><span class="page-link">…</span></li>{% endif %}
-              <li class="page-item"><a class="page-link" href="?page={{ recent_total_pages }}{{ filter_qs }}">{{ recent_total_pages }}</a></li>
-            {% endif %}
-            <li class="page-item {% if recent_page >= recent_total_pages %}disabled{% endif %}">
-              <a class="page-link" href="?page={{ recent_page + 1 }}{{ filter_qs }}">›</a>
-            </li>
-          </ul>
-        </nav>
-      </div>
-      {% endif %}
-    </div>
+    <div class="panel" id="dash-recent">{% include "_dash_recent.html" %}</div>
 
     <!-- 오른쪽: 강력매수 + 분석 큐 -->
     <div class="dash-col">
-      <div class="panel" style="flex: 1.3;">
-        <div class="panel-head">
-          <h6>🟢 강력매수 누계</h6>
-          <span class="meta">{{ strong_reports|length }}건</span>
-        </div>
-        <div class="panel-body">
-          <table class="compact">
-            <thead><tr><th>종목</th><th class="num">★</th><th></th></tr></thead>
-            <tbody>
-            {% for r in strong_reports %}
-              <tr>
-                <td><a href="/ticker/{{ r.ticker }}" class="name" title="이 종목의 모든 보고서 보기">{{ r.name }}</a>
-                    <div class="muted mono">{{ r.ticker }} · {{ r.week_label }}</div></td>
-                <td class="num mono">{{ "%.2f"|format(r.avg_rating) }}</td>
-                <td><a href="/report/{{ r.id }}" class="muted">→</a></td>
-              </tr>
-            {% else %}
-              <tr><td colspan="3" class="empty">아직 STRONG 없음</td></tr>
-            {% endfor %}
-            </tbody>
-          </table>
-        </div>
-      </div>
+      <div class="panel" id="dash-strong" style="flex: 1.3;">{% include "_dash_strong.html" %}</div>
 
       <!-- 분석 큐 (실행이력 자리). 목록은 이 패널 안에서 스크롤 -->
-      <div class="panel" style="flex: 1;">
-        <div class="panel-head">
-          <h6>🗂 분석 큐
-            {% if queue_paused %}<span class="queue-status queue-failed" title="큐 일시정지 상태">⏸ 일시정지</span>{% endif %}
-          </h6>
-          <span class="meta" style="display:flex; align-items:center; gap:8px;">
-            {% if queue_processing %}<span title="현재 분석 중인 종목 수">▶ {{ queue_processing }} 처리중</span>{% endif %}
-            <span>{{ queue_items|length }}건</span>
-            {% if queue_paused %}
-              <form method="post" action="/queue/resume" style="margin:0">
-                <button class="btn btn-sm" type="submit" title="분석 재개">▶ 재개</button>
-              </form>
-            {% else %}
-              <form method="post" action="/queue/pause" style="margin:0">
-                <button class="btn btn-sm" type="submit" title="처리 중인 종목 완료 후 멈춤">⏸ 일시정지</button>
-              </form>
-            {% endif %}
-          </span>
-        </div>
-        <div class="panel-body">
-          {% if queue_items %}
-          {% set pick_badges = {
-              'search':  ['🔍', '검색상위', 'pick-search'],
-              'upper':   ['🚀', '상한가',   'pick-upper'],
-              'quant':   ['🔥', '거래량급증', 'pick-quant'],
-              'z-score': ['📊', '일반',     'pick-zscore'],
-              'manual':  ['✍️', '수기',     'pick-manual'],
-              'telegram':['📩', '텔레그램',  'pick-manual'],
-          } %}
-          <table class="compact">
-            <tbody>
-            {% for q in queue_items %}
-              {% set pb = pick_badges.get(q.pick_source) %}
-              <tr>
-                <td style="width: 84px;">
-                  {% if q.status == 'pending' and q.attempts and q.attempts > 0 %}
-                    <span class="queue-status queue-retry" title="{{ q.last_error or '' }}">재시도 {{ q.attempts }}</span>
-                  {% elif q.status == 'failed' %}
-                    <span class="queue-status queue-failed" title="{{ q.last_error or '' }}">실패 {{ q.attempts }}</span>
-                  {% else %}
-                    <span class="queue-status queue-{{ q.status }}">{{ q.status }}</span>
-                  {% endif %}
-                </td>
-                <td>
-                  {{ q.name or q.ticker }}
-                  {% if pb %}<span class="pick-src {{ pb[2] }}" title="선정근거: {{ pb[1] }}">{{ pb[0] }} {{ pb[1] }}</span>{% endif %}
-                </td>
-                <td class="num" style="width: 24px;">
-                  <form method="post" action="/queue/{{ q.id }}/delete" style="margin:0"
-                        onsubmit="return confirm('큐에서 삭제하시겠어요?\n{{ q.name or q.ticker }} ({{ q.ticker }}) · {{ q.status }}');">
-                    <button class="btn btn-sm btn-link p-0 muted" style="border:0;">×</button>
-                  </form>
-                </td>
-              </tr>
-            {% endfor %}
-            </tbody>
-          </table>
-          {% else %}
-          <div class="empty">대기 중인 종목 없음</div>
-          {% endif %}
-        </div>
-      </div>
+      <div class="panel" id="dash-queue" style="flex: 1;">{% include "_dash_queue.html" %}</div>
     </div>
   </div>
 </div>
+
+<script>
+// ---------------------------------------------------------------------------
+// 부분 갱신(AJAX) — 과거 <meta refresh="10"> 전체 새로고침을 대체.
+// /api/dashboard가 각 영역 partial HTML을 내려주면 컨테이너 innerHTML만 교체.
+// 스크롤 위치·검색 포커스가 유지되고 화면 깜빡임이 없다.
+// ---------------------------------------------------------------------------
+(function () {
+  const AREAS = {
+    stats:  'dash-stats',
+    recent: 'dash-recent',
+    strong: 'dash-strong',
+    queue:  'dash-queue',
+  };
+  const ACTIVE_MS = 8000;    // 큐에 처리 대기/진행 항목이 있을 때
+  const IDLE_MS   = 30000;   // 큐가 비었을 때 (새 분석·외부 변화 반영용)
+  let timer = null;
+
+  // 사용자가 지금 만지고 있는 영역은 갱신을 건너뛴다(포커스·입력 보호).
+  function isUserBusy(areaKey) {
+    const el = document.getElementById(AREAS[areaKey]);
+    if (!el) return true;
+    const active = document.activeElement;
+    if (active && el.contains(active)) return true;     // 검색창 등 포커스 중
+    if (el.querySelector(':hover form')) { /* hover만으론 막지 않음 */ }
+    return false;
+  }
+
+  async function refresh() {
+    if (document.hidden) { schedule(IDLE_MS); return; }
+    try {
+      // 현재 보고 있는 페이지/필터/검색 상태를 그대로 전달해 맥락 유지
+      const qs = window.location.search || '';
+      const r = await fetch('/api/dashboard' + qs, {
+        headers: { 'Accept': 'application/json' },
+        cache: 'no-store',
+      });
+      if (!r.ok) { schedule(IDLE_MS); return; }
+      const data = await r.json();
+      for (const key of Object.keys(AREAS)) {
+        if (typeof data[key] !== 'string') continue;
+        if (isUserBusy(key)) continue;                  // 입력 중인 영역은 보존
+        const el = document.getElementById(AREAS[key]);
+        if (el) el.innerHTML = data[key];
+      }
+      // 큐가 활성일 때만 빠르게 폴링, 아니면 느슨하게
+      const busy = (data.queue_count || 0) > 0 || (data.queue_processing || 0) > 0;
+      schedule(busy ? ACTIVE_MS : IDLE_MS);
+    } catch (e) {
+      schedule(IDLE_MS);
+    }
+  }
+
+  function schedule(ms) {
+    clearTimeout(timer);
+    timer = setTimeout(refresh, ms);
+  }
+
+  // 탭이 다시 보이면 즉시 한 번 갱신
+  document.addEventListener('visibilitychange', () => {
+    if (!document.hidden) { clearTimeout(timer); refresh(); }
+  });
+
+  schedule(ACTIVE_MS);
+})();
+</script>
 
 {% endblock %}

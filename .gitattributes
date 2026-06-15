@@ -1,0 +1,9 @@
+# Windows 전용 실행 스크립트는 반드시 CRLF로 체크아웃되어야 한다.
+# (LF로 저장되면 cmd.exe가 .bat 라인을 잘못 파싱해 'is not recognized' 에러로 기동 실패)
+*.bat   text eol=crlf
+*.cmd   text eol=crlf
+*.vbs   text eol=crlf
+*.ps1   text eol=crlf
+
+# 그 외 텍스트는 git 기본 처리에 맡긴다.
+* text=auto
