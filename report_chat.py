@@ -124,6 +124,7 @@ async def ask(report_id: int, question: str) -> ChatResult:
         permission_mode="bypassPermissions",
         allowed_tools=["WebSearch", "WebFetch"],
         max_turns=MAX_TURNS,
+        env=config.sdk_env(),          # 홈 ~/.claude.json 동시 write 경합 회피
     )
 
     started = time.time()

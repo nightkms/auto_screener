@@ -1,4 +1,6 @@
 .env
+# Claude Code SDK 격리 설정 디렉토리 — OAuth 토큰·계정 정보가 들어가므로 절대 추적 금지
+.claude_config/
 .venv/
 __pycache__/
 *.pyc

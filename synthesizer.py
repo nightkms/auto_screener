@@ -126,6 +126,7 @@ async def synthesize(candidate: selector.Candidate,
         permission_mode="bypassPermissions",
         allowed_tools=[],
         max_turns=2,
+        env=config.sdk_env(),          # 홈 ~/.claude.json 동시 write 경합 회피
     )
     user_prompt = _build_synth_prompt(candidate, analysis, prior_summary)
 

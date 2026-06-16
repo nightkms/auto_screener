@@ -1,6 +1,7 @@
 """중앙 설정 로더. .env에서 모든 환경 변수 읽고 검증."""
 from __future__ import annotations
 import os
+import shutil
 from pathlib import Path
 from dotenv import load_dotenv
 
@@ -77,3 +78,63 @@ def require_telegram() -> tuple[str, str]:
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
         raise RuntimeError("TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID가 .env에 없습니다.")
     return TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID
+
+
+# ---------------------------------------------------------------------------
+# Claude Code SDK 설정 디렉토리 격리
+# ---------------------------------------------------------------------------
+# 스크리너는 종목당 5개 서브에이전트(+공시 요약/종합)를 병렬로 돌리는데, 각각
+# claude_agent_sdk가 claude.exe 서브프로세스를 띄운다. 이 프로세스들이 홈의
+# ~/.claude.json(계정·상태 파일)을 동시에 read-modify-write 하면 경합으로 깨질
+# 수 있다 — 특히 같은 머신에서 대화형 Claude Code 세션을 병행할 때.
+# → 프로젝트 전용 CLAUDE_CONFIG_DIR로 분리해 홈 config와의 충돌을 원천 차단한다.
+# 첫 호출 시 홈의 로그인/설정을 1회 시드하므로 별도 재로그인이 필요 없다.
+#
+# 격리를 끄려면 .env에 SCREENER_CLAUDE_CONFIG_DIR=off (또는 none/0) → 홈 config를
+# 그대로 쓴다. 다른 경로를 쓰려면 그 경로를 지정.
+# (_opt가 빈 값을 default로 덮으므로 빈 값이 아니라 명시 sentinel로 끈다)
+_cfg_raw = _opt("SCREENER_CLAUDE_CONFIG_DIR", str(ROOT / ".claude_config"))
+CLAUDE_CONFIG_DIR = "" if _cfg_raw.lower() in ("off", "none", "0") else _cfg_raw
+
+# 홈에서 격리 dir로 1회 시드할 인증/설정 파일.
+# (src 상대경로는 홈 기준, dst는 CLAUDE_CONFIG_DIR 기준)
+_SEED_FILES = (
+    ".claude.json",                 # 계정(userID·oauthAccount) + 상태 → ~/.claude.json
+    ".claude/.credentials.json",    # OAuth 토큰
+    ".claude/settings.json",        # 사용자 설정(선택)
+)
+
+_sdk_env_cache: dict[str, str] | None = None
+
+
+def _seed_claude_config(cfg: Path) -> None:
+    """격리 dir이 비어 있으면 홈의 로그인/설정을 복사해 재로그인을 피한다.
+    이미 있으면 건드리지 않는다(idempotent). 실패해도 치명적이지 않다 —
+    필요 시 해당 dir에서 직접 `claude` 로그인하면 된다."""
+    home = Path.home()
+    for rel in _SEED_FILES:
+        src = home / rel
+        dst = cfg / Path(rel).name      # 격리 dir에는 평탄하게(.credentials.json 등)
+        try:
+            if src.exists() and not dst.exists():
+                shutil.copy2(src, dst)
+        except Exception:
+            pass
+
+
+def sdk_env() -> dict[str, str]:
+    """ClaudeAgentOptions(env=...)에 넣을 환경변수.
+    홈 ~/.claude.json 동시 write 경합을 막기 위해 CLAUDE_CONFIG_DIR을 프로젝트
+    전용으로 고정한다. SDK는 이 dict를 부모 환경에 '병합'하므로 PATH 등은 유지된다.
+    빈 값으로 격리를 끄면 {} 를 반환(=홈 config 사용)."""
+    global _sdk_env_cache
+    if _sdk_env_cache is not None:
+        return _sdk_env_cache
+    if not CLAUDE_CONFIG_DIR:
+        _sdk_env_cache = {}
+        return _sdk_env_cache
+    cfg = Path(CLAUDE_CONFIG_DIR)
+    cfg.mkdir(parents=True, exist_ok=True)
+    _seed_claude_config(cfg)
+    _sdk_env_cache = {"CLAUDE_CONFIG_DIR": str(cfg)}
+    return _sdk_env_cache

@@ -279,6 +279,7 @@ async def _run_one(sub_name: str, user_prompt: str,
         permission_mode="bypassPermissions",
         allowed_tools=["WebSearch", "WebFetch"],
         max_turns=MAX_TURNS_PER_AGENT.get(sub_name, 6),
+        env=config.sdk_env(),          # 홈 ~/.claude.json 동시 write 경합 회피
     )
     started = time.time()
     pieces: list[str] = []
@@ -360,6 +361,7 @@ async def _summarize_document(d: dict, body: str, fields: dict) -> str:
         permission_mode="bypassPermissions",
         allowed_tools=[],          # 본문만 보고 요약 (웹검색 불필요)
         max_turns=1,
+        env=config.sdk_env(),      # 홈 ~/.claude.json 동시 write 경합 회피
     )
     pieces: list[str] = []
 

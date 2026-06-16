@@ -108,6 +108,21 @@ python notifier.py last         # 최근 실행 결과 다시 푸시
 
 회당 6개 LLM 호출 × 후보 5개 = **30 호출**. Sonnet 위주라 Max 플랜으로 동작하나, 매시각 도는 만큼 일일 한도 도달 시 다음 리셋까지 차단될 수 있음(부팅·정각마다 큐 자동 복구).
 
+### Claude 인증 & 설정 디렉토리 격리
+
+LLM 호출은 `claude_agent_sdk`가 띄우는 **`claude` CLI 서브프로세스**로 동작한다(별도 API 키 불필요, 로그인된 Claude Max/Pro 구독 한도 사용). 한 종목당 5개 서브에이전트 + 공시 요약/종합이 **동시에** 떠서 각자 `claude`를 실행한다.
+
+이때 기본값인 홈의 `~/.claude.json`(계정·상태 파일)을 여러 프로세스가 동시에 read-modify-write 하면 **경합으로 깨질 수 있다** — 특히 같은 PC에서 대화형 Claude Code 세션을 같이 켜둔 경우. 이를 막기 위해 스크리너는 **프로젝트 전용 설정 디렉토리(`.claude_config/`)로 자동 격리**한다:
+
+- 첫 실행 시 홈의 로그인/설정(`~/.claude.json`, `~/.claude/.credentials.json`, `~/.claude/settings.json`)을 `.claude_config/`로 **1회 자동 시드** → 별도 재로그인 불필요.
+- `.claude_config/`는 OAuth 토큰을 담으므로 **`.gitignore`로 추적 제외**(절대 커밋 금지).
+- 경로 변경/비활성화는 `.env`의 `SCREENER_CLAUDE_CONFIG_DIR`로:
+  - 미설정(기본) → `.claude_config/`로 격리(권장)
+  - `=off` (또는 `none`/`0`) → 격리 끄고 홈 `~/.claude.json` 그대로 사용
+  - `=<경로>` → 지정 경로로 격리
+
+> 격리 디렉토리에서 인증이 안 풀리면(예: 홈에 로그인이 없던 상태) 해당 디렉토리를 `CLAUDE_CONFIG_DIR`로 지정한 채 `claude` 로그인을 1회 하면 된다.
+
 ## 신호 등급
 
 | 등급 | 기준 (synthesizer가 판정, fallback rule 있음) | 자동 실행 알림 |
