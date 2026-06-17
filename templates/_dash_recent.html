@@ -31,19 +31,29 @@
   </form>
 </div>
 <div class="panel-body">
+  {# 큐 패널과 동일한 선정근거 배지 매핑 #}
+  {% set pick_badges = {
+      'search':  ['🔍', '검색상위', 'pick-search'],
+      'upper':   ['🚀', '상한가',   'pick-upper'],
+      'quant':   ['🔥', '거래량급증', 'pick-quant'],
+      'z-score': ['📊', '일반',     'pick-zscore'],
+      'manual':  ['✍️', '수기',     'pick-manual'],
+      'telegram':['📩', '텔레그램',  'pick-manual'],
+  } %}
   <table class="compact">
     <thead><tr>
-      <th>등급</th><th>종목</th><th class="num">★</th>
-      <th>주차</th><th>분석일</th><th></th><th></th>
+      <th>등급</th><th>종목</th><th>선정근거</th><th class="num">★</th>
+      <th>분석일</th><th></th><th></th>
     </tr></thead>
     <tbody>
     {% for r in recent_items %}
+      {% set pb = pick_badges.get(r.pick_source) %}
       <tr>
         <td><span class="grade-pill grade-{{ r.grade }}">{{ r.grade }}</span></td>
         <td><a href="/ticker/{{ r.ticker }}" class="name" title="이 종목의 모든 보고서 보기">{{ r.name }}</a>
             <span class="muted ms-1 mono">{{ r.ticker }}</span></td>
+        <td>{% if pb %}<span class="pick-src {{ pb[2] }}" title="선정근거: {{ pb[1] }}">{{ pb[0] }} {{ pb[1] }}</span>{% else %}<span class="muted">–</span>{% endif %}</td>
         <td class="num mono">{{ "%.2f"|format(r.avg_rating) }}</td>
-        <td class="muted mono">{{ r.week_label }}</td>
         <td class="muted">{{ r.run_started[:16] }}</td>
         <td><a href="/report/{{ r.id }}" class="muted">보고서 →</a></td>
         <td class="num" style="width: 24px;">

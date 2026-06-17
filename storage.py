@@ -56,6 +56,7 @@ CREATE TABLE IF NOT EXISTS reports (
     name         TEXT,
     grade        TEXT,                              -- STRONG/WATCH/INTEREST/SKIP
     avg_rating   REAL,
+    pick_source  TEXT,                              -- selector 선정근거: search/upper/quant/z-score/manual
     md_path      TEXT,                              -- analysis/auto/YYYY-W##/...
     tokens_in    INTEGER DEFAULT 0,
     tokens_out   INTEGER DEFAULT 0,
@@ -173,6 +174,9 @@ def _migrate(c: sqlite3.Connection) -> None:
     if "pick_source" not in cols("analysis_queue"):
         c.execute("ALTER TABLE analysis_queue ADD COLUMN pick_source TEXT")
         log.info("migrate: analysis_queue.pick_source 추가")
+    if "pick_source" not in cols("reports"):
+        c.execute("ALTER TABLE reports ADD COLUMN pick_source TEXT")
+        log.info("migrate: reports.pick_source 추가")
 
     # ticker_state에 last_run_id FK가 살아있으면 (이전 스키마) 테이블 재생성.
     # 이 테이블은 미러 캐시라 데이터 보존 안 해도 무방.
@@ -271,14 +275,15 @@ def save_candidates(run_id: int, candidates: list[dict]) -> None:
 def save_report(run_id: int, ticker: str, name: str, grade: str,
                 avg_rating: float, md_path: str, tokens_in: int,
                 tokens_out: int, elapsed_s: float,
-                sub_ratings: dict[str, dict]) -> int:
+                sub_ratings: dict[str, dict],
+                pick_source: str = "") -> int:
     with _connect() as c:
         cur = c.execute(
             """INSERT INTO reports
-               (run_id, ticker, name, grade, avg_rating, md_path,
+               (run_id, ticker, name, grade, avg_rating, pick_source, md_path,
                 tokens_in, tokens_out, elapsed_s)
-               VALUES (?,?,?,?,?,?,?,?,?)""",
-            (run_id, ticker, name, grade, avg_rating, md_path,
+               VALUES (?,?,?,?,?,?,?,?,?,?)""",
+            (run_id, ticker, name, grade, avg_rating, pick_source or None, md_path,
              tokens_in, tokens_out, elapsed_s),
         )
         rid = cur.lastrowid
