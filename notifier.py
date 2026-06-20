@@ -290,6 +290,21 @@ async def notify_error(message: str, run_id: int | None = None,
         return await _send(session, text, parse_mode=None)
 
 
+async def notify_auth_expired(detail: str = "") -> bool:
+    """Claude OAuth 인증 만료 알림. 받으면 원격 접속해 `claude` 로 재로그인하면
+    다음 정각에 자동 복구된다(홈 토큰 갱신 → 격리본으로 자동 반영)."""
+    lines = [
+        "🔑 AutoScreener 인증 만료",
+        "Claude OAuth 토큰이 만료되어 자동 분석이 멈췄습니다.",
+        "원격 접속 후 `claude` 로 한 번 로그인하면 다음 정각에 자동 복구됩니다.",
+    ]
+    if detail:
+        lines.append("")
+        lines.append(detail)
+    async with aiohttp.ClientSession() as session:
+        return await _send(session, "\n".join(lines), parse_mode=None)
+
+
 async def notify_price_alert(ticker: str, name: str, base_price: float,
                               current_price: float, change_pct: float,
                               base_grade: str | None = None,

@@ -5,23 +5,10 @@ cd /d "%~dp0"
 if not exist data mkdir data
 if not exist logs mkdir logs
 
-REM 이미 떠 있으면 죽이고 새로 띄운다 (stop 따로 안 해도 되게).
-if exist data\screener.pid (
-    set /p OLDPID=<data\screener.pid
-    if defined OLDPID (
-        tasklist /fi "PID eq !OLDPID!" 2>nul | findstr /i "pythonw" >nul
-        if not errorlevel 1 (
-            echo Found running instance PID=!OLDPID! - stopping it...
-            taskkill /PID !OLDPID! /T /F >nul 2>&1
-            REM 포트(8765)/PID 해제까지 잠깐 대기
-            timeout /t 2 /nobreak >nul
-            echo [OK] Old instance stopped.
-            echo.
-        )
-    )
-    del data\screener.pid >nul 2>&1
-    set "OLDPID="
-)
+REM Kill every running instance (venv stub + child + accidental duplicates) before starting.
+echo Stopping any running instances...
+powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0_stop_all.ps1"
+timeout /t 2 /nobreak >nul
 
 if not exist .venv\Scripts\pythonw.exe (
     echo ERROR: .venv\Scripts\pythonw.exe not found.

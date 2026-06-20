@@ -348,6 +348,30 @@ async def _run_one(sub_name: str, user_prompt: str,
     )
 
 
+async def keepalive_refresh(timeout_s: int = 60) -> None:
+    """홈 config(격리 안 함)로 1턴 trivial 쿼리를 돌려 OAuth 토큰 갱신을 유도한다.
+    토큰 만료가 임박/경과했을 때 무인 상태에서도 인증을 살려두기 위함이다.
+
+    - env={}는 부모 환경에 빈 dict를 '병합'하므로 CLAUDE_CONFIG_DIR이 설정되지 않아
+      홈 config(~/.claude)를 사용한다. 반드시 홈을 갱신해야 대화형 Claude Code
+      세션과 리프레시 토큰 회전 충돌이 나지 않는다(격리본은 per-run 복사로 따라옴).
+    - 1턴 후 프로세스는 스스로 종료되므로 별도 kill 불필요. 멈춤 방지로 타임아웃만 건다.
+    실패(네트워크/리프레시 토큰 만료)는 예외로 전파 → 호출부에서 알림 폴백."""
+    opts = ClaudeAgentOptions(
+        model=config.CLAUDE_SUB_MODEL,
+        permission_mode="bypassPermissions",
+        allowed_tools=[],
+        max_turns=1,
+        env={},
+    )
+
+    async def _consume() -> None:
+        async for _ in query(prompt="ping", options=opts):
+            pass
+
+    await asyncio.wait_for(_consume(), timeout=timeout_s)
+
+
 # ---------------------------------------------------------------------------
 # 공시 본문 요약 (증분 캐시) — 제목만으로 호재/악재가 안 드러나는 공시를 위해.
 # 비싼 건 본문 fetch + LLM 요약이므로 그 결과만 캐시하고, 목록(list.json)은
