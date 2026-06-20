@@ -651,6 +651,48 @@ def period_stats(days: int = 30) -> dict:
     }
 
 
+def daily_series(days: int = 30) -> list[dict]:
+    """대시보드 콤보 차트용 일자별 시계열.
+    각 항목: {date:'MM-DD', tokens:int, S/W/I/K:int(등급별 발견 수)}.
+    토큰은 usage_log, 등급은 reports(runs join). 빈 날짜는 0으로 채운다.
+    저장 timestamp가 로컬 isoformat이라 substr(...,1,10)으로 날짜('YYYY-MM-DD')를 뽑는다."""
+    today = datetime.now().date()
+    start = today - timedelta(days=days - 1)
+    start_iso = start.isoformat()
+    with _connect() as c:
+        tok_rows = c.execute(
+            """SELECT substr(timestamp, 1, 10) AS d,
+                      COALESCE(SUM(tokens_in + tokens_out), 0) AS t
+               FROM usage_log
+               WHERE substr(timestamp, 1, 10) >= ?
+               GROUP BY d""",
+            (start_iso,),
+        ).fetchall()
+        grade_rows = c.execute(
+            """SELECT substr(runs.started_at, 1, 10) AS d, r.grade AS g, COUNT(*) AS n
+               FROM reports r JOIN runs ON r.run_id = runs.id
+               WHERE substr(runs.started_at, 1, 10) >= ?
+               GROUP BY d, g""",
+            (start_iso,),
+        ).fetchall()
+    tok = {row["d"]: row["t"] for row in tok_rows}
+    grades: dict[str, dict[str, int]] = {}
+    for row in grade_rows:
+        grades.setdefault(row["d"], {})[row["g"]] = row["n"]
+    out = []
+    for i in range(days):
+        d = start + timedelta(days=i)
+        ds = d.isoformat()
+        gd = grades.get(ds, {})
+        out.append({
+            "date": d.strftime("%m-%d"),
+            "tokens": tok.get(ds, 0),
+            "S": gd.get("STRONG", 0), "W": gd.get("WATCH", 0),
+            "I": gd.get("INTEREST", 0), "K": gd.get("SKIP", 0),
+        })
+    return out
+
+
 def strong_reports(limit: int = 50) -> list[dict]:
     """STRONG 등급 종목 누적 (대시보드 '강력매수 추천' 섹션)."""
     with _connect() as c:

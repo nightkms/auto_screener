@@ -37,19 +37,33 @@
 {% endif %}
 
 <div class="page">
-  <!-- 통계 카드 -->
-  <div class="stat-row" id="dash-stats">{% include "_dash_stats.html" %}</div>
+  <div class="layout-grid">
 
-  <div class="dash-grid">
-    <!-- 왼쪽: 최근 분석 (페이징) -->
-    <div class="panel" id="dash-recent">{% include "_dash_recent.html" %}</div>
+    <!-- 좌: 콤보 차트(위) + 최근 분석(아래) -->
+    <div class="left-col">
+      <div class="chart-card">
+        <div class="chart-head">
+          <div class="chart-kpi"><span id="tok-kpi">–</span><span class="unit">tok</span>
+            <span class="kpi-sep">· 발견 <span id="grade-kpi">–</span><span class="unit">건</span></span></div>
+          <div class="chart-legend">
+            <span class="lg"><span class="sw sw-line"></span>토큰(라인)</span>
+            <span class="lg"><span class="sw" style="background:#16a34a"></span>STRONG</span>
+            <span class="lg"><span class="sw" style="background:#f59e0b"></span>WATCH</span>
+            <span class="lg"><span class="sw" style="background:#64748b"></span>INTEREST</span>
+            <span class="lg"><span class="sw" style="background:#cbd5e1"></span>SKIP</span>
+          </div>
+        </div>
+        <div class="chart-svg-wrap"><canvas id="combo-chart"></canvas><canvas id="combo-glow" class="combo-glow"></canvas></div>
+      </div>
 
-    <!-- 오른쪽: 강력매수 + 분석 큐 -->
-    <div class="dash-col">
-      <div class="panel" id="dash-strong" style="flex: 1.3;">{% include "_dash_strong.html" %}</div>
+      <!-- 최근 분석 (페이징). 목록은 이 패널 안에서 스크롤 -->
+      <div class="panel" id="dash-recent">{% include "_dash_recent.html" %}</div>
+    </div>
 
-      <!-- 분석 큐 (실행이력 자리). 목록은 이 패널 안에서 스크롤 -->
-      <div class="panel" id="dash-queue" style="flex: 1;">{% include "_dash_queue.html" %}</div>
+    <!-- 우: 강력매수(위) + 분석 큐(아래) -->
+    <div class="right-col">
+      <div class="panel" id="dash-strong">{% include "_dash_strong.html" %}</div>
+      <div class="panel" id="dash-queue">{% include "_dash_queue.html" %}</div>
     </div>
   </div>
 </div>
@@ -62,7 +76,6 @@
 // ---------------------------------------------------------------------------
 (function () {
   const AREAS = {
-    stats:  'dash-stats',
     recent: 'dash-recent',
     strong: 'dash-strong',
     queue:  'dash-queue',
@@ -98,6 +111,8 @@
         const el = document.getElementById(AREAS[key]);
         if (el) el.innerHTML = data[key];
       }
+      // 차트는 innerHTML 교체 대상이 아니라 데이터만 갱신(캔버스/인스턴스 보존)
+      if (data.chart && window.updateCombo) window.updateCombo(data.chart);
       // 큐가 활성일 때만 빠르게 폴링, 아니면 느슨하게
       const busy = (data.queue_count || 0) > 0 || (data.queue_processing || 0) > 0;
       schedule(busy ? ACTIVE_MS : IDLE_MS);
@@ -117,6 +132,211 @@
   });
 
   schedule(ACTIVE_MS);
+})();
+</script>
+
+<!-- 콤보 차트 (Chart.js) -->
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
+<script>window.CHART_SERIES = {{ chart_series|tojson }};</script>
+<script>
+// ---------------------------------------------------------------------------
+// 콤보 차트: 등급 누적 컬럼바(우축 건수) + 토큰 라인(좌축), 호버 툴팁.
+//  · 바: 칩 배경색(--*-bg) 채움 + 어두운 등급색(--*) 외곽선. STRONG이 맨 위 스택.
+//  · 데이터=window.CHART_SERIES(30일). /api/dashboard 폴링이 updateCombo로 갱신.
+// ---------------------------------------------------------------------------
+(function () {
+  if (!window.Chart) return;
+  const el = document.getElementById('combo-chart');
+  if (!el) return;
+  const css = getComputedStyle(document.documentElement);
+  const V = n => css.getPropertyValue(n).trim();
+  const fmtK = n => n >= 1e6 ? (n/1e6).toFixed(1)+'M' : n >= 1e3 ? Math.round(n/1e3)+'K' : ''+n;
+  // 강렬한 등급 팔레트 — 컬럼 사이 구분선 없이 색으로만 구분. (배열 순서 = 스택 아래→위)
+  //   값 0인 날은 data에서 null → 아예 안 그림. 막대 높이는 실제 비율(최소높이 안 잡음).
+  //   STRONG은 작아도 눈에 띄게 녹색 글로우 이펙트(strongGlow)로 강조.
+  const GM = [
+    { key:'K', label:'SKIP',     fill:'#cbd5e1' },   // 옅은 슬레이트(뒤로 물림)
+    { key:'I', label:'INTEREST', fill:'#64748b' },   // 중간 슬레이트
+    { key:'W', label:'WATCH',    fill:'#f59e0b' },   // 강렬한 앰버
+    { key:'S', label:'STRONG',   fill:'#16a34a' },   // 강렬한 그린 (글로우)
+  ];
+  let TOK = [];   // lastPointPlugin이 참조 (updateCombo가 재대입)
+
+  // 마지막(오늘) 점 + 값 라벨 강조 — Chart.js 기본엔 없어 커스텀 플러그인
+  const lastPointPlugin = {
+    id: 'lastPoint',
+    afterDatasetsDraw(chart) {
+      const di = chart.data.datasets.findIndex(d => d.label === '토큰');
+      if (di < 0) return;
+      const meta = chart.getDatasetMeta(di);
+      const pt = meta.data[meta.data.length - 1];
+      if (!pt || !TOK.length) return;
+      const { ctx, chartArea: ax } = chart;
+      const x = pt.x, y = pt.y, val = fmtK(TOK[TOK.length - 1]);
+      ctx.save();
+      ctx.fillStyle = '#fff'; ctx.beginPath(); ctx.arc(x, y, 4.5, 0, Math.PI*2); ctx.fill();
+      ctx.fillStyle = V('--accent'); ctx.beginPath(); ctx.arc(x, y, 3, 0, Math.PI*2); ctx.fill();
+      ctx.font = '700 11px ' + Chart.defaults.font.family;
+      const w = ctx.measureText(val).width + 14;
+      const px = Math.min(x + 8, ax.right - w), py = Math.max(ax.top, y - 24);
+      ctx.fillStyle = V('--accent');
+      ctx.beginPath(); ctx.roundRect(px, py, w, 17, 5); ctx.fill();
+      ctx.fillStyle = '#fff'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+      ctx.fillText(val, px + w/2, py + 9);
+      ctx.restore();
+    },
+  };
+
+  Chart.defaults.font.family = getComputedStyle(document.body).fontFamily;
+  Chart.defaults.font.size = 11;
+  Chart.defaults.color = V('--ink-muted');
+
+  const series0 = Array.isArray(window.CHART_SERIES) ? window.CHART_SERIES : [];
+  const labels0 = series0.map(d => d.date);
+  TOK = series0.map(d => d.tokens);
+
+  const barDatasets = GM.map(m => ({
+    type:'bar', label:m.label, stack:'grade', yAxisID:'yCount', order:2,
+    data: series0.map(d => d[m.key] || null),     // 0 → null: 빈 등급은 안 그림
+    backgroundColor: m.fill, borderWidth: 0,
+    borderRadius: m.key === 'S' ? { topLeft:4, topRight:4 } : 0,
+    borderSkipped:false, categoryPercentage:0.68, barPercentage:0.9,
+  }));
+  const tokenDataset = {
+    type:'line', label:'토큰', data: TOK.slice(), yAxisID:'yTok', order:0,
+    borderColor:V('--accent'), borderWidth:2.25, tension:0.35,
+    fill:false, pointRadius:0, pointHoverRadius:4,
+    pointHoverBackgroundColor:V('--accent'), pointHoverBorderColor:'#fff', pointHoverBorderWidth:2,
+  };
+
+  const chart = new Chart(el, {
+    data: { labels: labels0, datasets: [...barDatasets, tokenDataset] },
+    plugins: [lastPointPlugin],
+    options: {
+      responsive:true, maintainAspectRatio:false,
+      layout:{ padding:{ top:8, right:4, bottom:0, left:0 } },
+      interaction:{ mode:'index', intersect:false },
+      animation:{ duration:400 },
+      scales:{
+        x:{ stacked:true, grid:{ display:false }, border:{ display:false },
+            ticks:{ autoSkip:false, maxRotation:0, padding:6,
+              callback:function(v, i){ const n = this.chart.data.labels.length;
+                return (i % 5 === 0 || i === n - 1) ? this.getLabelForValue(v) : ''; } } },
+        yTok:{ position:'left', beginAtZero:true,
+            grid:{ color:V('--border'), drawTicks:false }, border:{ display:false },
+            ticks:{ maxTicksLimit:3, padding:6, callback:v=>fmtK(v) } },
+        yCount:{ position:'right', stacked:true, beginAtZero:true,
+            grid:{ display:false }, border:{ display:false },
+            ticks:{ maxTicksLimit:3, padding:6, precision:0, callback:v=>v+'건' } },
+      },
+      plugins:{
+        legend:{ display:false },
+        tooltip:{
+          backgroundColor:'#14171c', titleColor:'#fff', bodyColor:'#e6e9ee',
+          padding:10, cornerRadius:8, boxPadding:4, usePointStyle:true,
+          titleFont:{ weight:'700' }, bodyFont:{ size:12 },
+          itemSort:(a,b)=> b.datasetIndex - a.datasetIndex,
+          // 분석된 종목(등급)이 없어도 툴팁은 항상 띄운다 — 최소한 날짜(+토큰)는 보여준다.
+          //  · 등급(>0)이 하나라도 있으면 토큰은 제목 괄호로만, 본문엔 등급만(기존 동작).
+          //  · 0건인 날은 등급이 전부 빠져 항목이 0개 → 툴팁이 사라지므로, 토큰 라인 항목만 남긴다.
+          filter: (item, i, arr) => item.dataset.yAxisID !== 'yTok'
+            ? (item.parsed.y != null && item.parsed.y > 0)
+            : !arr.some(it => it.dataset.yAxisID !== 'yTok' && it.parsed.y != null && it.parsed.y > 0),
+          callbacks:{
+            title: items => {
+              if (!items.length) return '';
+              const ds = items[0].chart.data.datasets.find(d => d.label === '토큰');
+              const v = ds ? ds.data[items[0].dataIndex] : 0;
+              return items[0].label + (v ? ' (토큰 ' + fmtK(v) + ')' : '');   // 토큰 0/없음 → 날짜만
+            },
+            // 토큰만 남은(0건) 날은 빈 줄·색상박스가 안 생기게 [] 반환(본문 라인 0개, 제목만 표시).
+            label: ctx => ctx.dataset.yAxisID === 'yTok' ? [] : '  ' + ctx.dataset.label + '  ' + ctx.parsed.y + '건',
+          },
+        },
+      },
+    },
+  });
+
+  function setKpis(series) {
+    const tk = series.reduce((a,d)=>a + (d.tokens||0), 0);
+    const fd = series.reduce((a,d)=>a + d.S + d.W + d.I + d.K, 0);
+    const t = document.getElementById('tok-kpi'); if (t) t.textContent = fmtK(tk);
+    const g = document.getElementById('grade-kpi'); if (g) g.textContent = fd;
+  }
+  setKpis(series0);
+
+  let lastJSON = JSON.stringify(series0);
+  window.updateCombo = function (series) {
+    if (!Array.isArray(series) || !series.length) return;
+    const js = JSON.stringify(series);
+    if (js === lastJSON) return;            // 변화 없으면 재애니메이션 생략
+    lastJSON = js;
+    chart.data.labels = series.map(d => d.date);
+    GM.forEach((m,i)=>{ chart.data.datasets[i].data = series.map(d=>d[m.key] || null); });
+    TOK = series.map(d => d.tokens);
+    chart.data.datasets[GM.length].data = TOK.slice();
+    chart.update();
+    setKpis(series);
+  };
+
+  // STRONG 펄스 글로우 — 별도 오버레이 캔버스에 녹색 글로우를 밝았다 어두웠다(rAF).
+  // "나 여기 있다" 효과. 막대 위에만 덧그리고 pointer-events:none이라 호버/툴팁과 무관.
+  const glowCanvas = document.getElementById('combo-glow');
+  if (glowCanvas) {
+    const gctx = glowCanvas.getContext('2d');
+    let rafId = null;
+    function glowFrame() {
+      const dpr = window.devicePixelRatio || 1;
+      const cw = el.clientWidth, ch = el.clientHeight;
+      if (cw && ch) {
+        if (glowCanvas.width !== Math.round(cw*dpr) || glowCanvas.height !== Math.round(ch*dpr)) {
+          glowCanvas.width = Math.round(cw*dpr); glowCanvas.height = Math.round(ch*dpr);
+          glowCanvas.style.width = cw + 'px'; glowCanvas.style.height = ch + 'px';
+        }
+        glowCanvas.style.left = el.offsetLeft + 'px';
+        glowCanvas.style.top = el.offsetTop + 'px';
+        gctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+        gctx.clearRect(0, 0, cw, ch);
+        const di = chart.data.datasets.findIndex(d => d.label === 'STRONG');
+        if (di >= 0) {
+          const data = chart.data.datasets[di].data;
+          const meta = chart.getDatasetMeta(di);
+          const pulse = 0.5 + 0.5 * Math.sin(performance.now() / 70);   // ~0.44s 왕복(빠른 깜빡임)
+          // 거의 흰색(저) ↔ 쌩 녹색(고)으로 색 자체를 반전 (투명도 아님)
+          const pr = Math.round(238 + (22  - 238) * pulse);
+          const pg = Math.round(255 + (163 - 255) * pulse);
+          const pb = Math.round(244 + (74  - 244) * pulse);
+          const glowFill = `rgb(${pr},${pg},${pb})`;
+          meta.data.forEach((bar, i) => {
+            if (data[i] == null || data[i] <= 0) return;
+            const p = bar.getProps(['x', 'y', 'base', 'width'], true);
+            const w = p.width, x = p.x - w / 2, y = p.y, h = p.base - p.y;
+            if (h <= 0) return;
+            const r = Math.min(4, w / 2, h);
+            gctx.save();
+            gctx.shadowColor = 'rgba(34,197,94,1)';          // 녹색 절정에서 글로우 강하게
+            gctx.shadowBlur = 2 + 16 * pulse;
+            gctx.fillStyle = glowFill;                       // 거의 흰색 ↔ 쌩 녹색
+            gctx.beginPath();
+            gctx.roundRect(x, y, w, h, [r, r, 0, 0]);
+            gctx.fill();
+            gctx.restore();
+          });
+          // 호버해도 깜빡임은 유지하되, 툴팁 박스 영역만 글로우를 지워 겹침 방지
+          const tt = chart.tooltip;
+          if (tt && tt.opacity > 0 && tt.width) {
+            const pad = 14;
+            gctx.clearRect(tt.x - pad, tt.y - pad, tt.width + 2 * pad, tt.height + 2 * pad);
+          }
+        }
+      }
+      rafId = requestAnimationFrame(glowFrame);
+    }
+    const startGlow = () => { if (!rafId) rafId = requestAnimationFrame(glowFrame); };
+    const stopGlow = () => { if (rafId) { cancelAnimationFrame(rafId); rafId = null; } };
+    document.addEventListener('visibilitychange', () => { document.hidden ? stopGlow() : startGlow(); });
+    startGlow();
+  }
 })();
 </script>
 

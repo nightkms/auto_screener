@@ -96,6 +96,7 @@ def _build_dashboard_context(request: Request) -> dict[str, Any]:
 
     return {
         "stats": stats,
+        "chart_series": storage.daily_series(30),
         "strong_reports": strong,
         "recent_items": recent_items,
         "recent_page": page,
@@ -138,10 +139,32 @@ async def api_dashboard(request: Request) -> JSONResponse:
     ctx = _build_dashboard_context(request)
     env = templates.env
     return JSONResponse({
-        "stats": env.get_template("_dash_stats.html").render(ctx),
         "recent": env.get_template("_dash_recent.html").render(ctx),
         "strong": env.get_template("_dash_strong.html").render(ctx),
         "queue": env.get_template("_dash_queue.html").render(ctx),
+        "chart": ctx["chart_series"],
+        "queue_count": len(ctx["queue_items"]),
+        "queue_processing": ctx["queue_processing"],
+    })
+
+
+def _wants_json(request: Request) -> bool:
+    """AJAX(fetch) 요청인지. 그러면 전체 리다이렉트 대신 큐 partial JSON을 준다.
+    JS가 꺼진 환경에선 이 헤더가 없으니 기존 RedirectResponse로 폴백된다."""
+    return (request.headers.get("x-requested-with", "").lower() == "fetch"
+            or "application/json" in request.headers.get("accept", "").lower())
+
+
+def _queue_json(request: Request, toast: str = "",
+                toast_type: str = "success") -> JSONResponse:
+    """큐 패널 partial을 다시 렌더해 토스트와 함께 JSON으로 반환. 폼 AJAX 공통 응답.
+    프런트는 이걸 받아 #dash-queue innerHTML만 교체하고 showToast를 띄운다."""
+    storage.init_db()
+    ctx = _build_dashboard_context(request)
+    return JSONResponse({
+        "queue": templates.env.get_template("_dash_queue.html").render(ctx),
+        "toast": toast,
+        "toast_type": toast_type,
         "queue_count": len(ctx["queue_items"]),
         "queue_processing": ctx["queue_processing"],
     })
@@ -154,38 +177,54 @@ async def api_search(q: str = "") -> list[dict]:
 
 
 @app.post("/queue/add")
-async def queue_add(ticker: str = Form(...), name: str = Form("")):
+async def queue_add(request: Request, ticker: str = Form(...),
+                    name: str = Form("")):
     ticker = ticker.strip()
     if not (ticker.isdigit() and len(ticker) == 6):
+        if _wants_json(request):
+            return _queue_json(request, f"{ticker} 잘못된 코드", "warning")
         return RedirectResponse(url=f"/?dup={ticker}", status_code=303)
     # 대시보드에서 검색 → 추가하는 경로는 source='manual' (등급 무관 알림)
     added = storage.add_to_queue(ticker, name=name.strip(),
                                  source="manual", pick_source="manual")
+    if _wants_json(request):
+        if added:
+            return _queue_json(request, f"✓ 큐에 추가: {name or ticker}", "success")
+        return _queue_json(request, f"{name or ticker} 이미 큐에 있음", "warning")
     flash = "queued" if added else "dup"
     return RedirectResponse(
         url=f"/?{flash}={ticker}", status_code=303)
 
 
 @app.post("/queue/pause")
-async def queue_pause():
+async def queue_pause(request: Request):
     """큐 분석 일시정지. 처리 중인 종목은 끝까지 두고, 다음 종목부터 멈춤.
     영속 상태라 재시작해도 유지 → 재기동 후 명시적 재개 전까지 분석 안 함."""
     storage.set_queue_paused(True)
     log.info("큐 일시정지 요청됨 (처리 중 항목 완료 후 idle)")
+    if _wants_json(request):
+        return _queue_json(
+            request, "⏸ 큐 일시정지됨 — 처리 중인 종목이 끝나면 idle 상태가 됩니다.",
+            "warning")
     return RedirectResponse(url="/?paused=1", status_code=303)
 
 
 @app.post("/queue/resume")
-async def queue_resume():
+async def queue_resume(request: Request):
     """큐 분석 재개."""
     storage.set_queue_paused(False)
     log.info("큐 재개 요청됨")
+    if _wants_json(request):
+        return _queue_json(
+            request, "▶ 큐 재개됨 — 다음 종목부터 분석을 다시 시작합니다.", "success")
     return RedirectResponse(url="/?resumed=1", status_code=303)
 
 
 @app.post("/queue/{qid}/delete")
-async def queue_delete(qid: int):
+async def queue_delete(qid: int, request: Request):
     storage.remove_queue_item(qid)
+    if _wants_json(request):
+        return _queue_json(request, "✓ 큐에서 삭제됨", "success")
     return RedirectResponse(url="/", status_code=303)
 
 
@@ -482,7 +521,7 @@ async def queue_worker():
 
 
 @app.post("/trigger")
-async def trigger():
+async def trigger(request: Request):
     """핫 종목 N개를 선정해 큐에 추가. 분석은 큐 워커가 1개씩 진행.
     버튼으로 트리거해도 자동 스크리닝과 동일한 정책 (STRONG만 알림)."""
     try:
@@ -491,7 +530,17 @@ async def trigger():
         )
     except Exception:
         log.exception("hot picks 큐 추가 실패")
+        if _wants_json(request):
+            return _queue_json(
+                request, "❌ 핫 종목 큐 추가 실패 (logs/screener.err.log 확인)", "danger")
         return RedirectResponse(url="/?err=enqueue", status_code=303)
+    if _wants_json(request):
+        if added == 0:
+            return _queue_json(
+                request, "⚠ 큐에 추가된 종목 없음 — 검색·시총 상위 후보가 모두 최근 "
+                "30일 dedup에 걸렸습니다. 시간이 지나면 자연히 추가됩니다.", "warning")
+        return _queue_json(
+            request, f"▶ 핫 종목 {added}개 큐에 추가됨. 워커가 1개씩 분석합니다.", "success")
     return RedirectResponse(url=f"/?hot={added}", status_code=303)
 
 

@@ -166,31 +166,44 @@
     .grade-SKIP     { background: var(--skip-bg);      color: var(--skip); }
     .grade-crashed  { background: var(--danger-bg);    color: var(--danger); }
 
-    /* ---- 통계 카드 ---- */
-    .stat-row {
-      flex: 0 0 auto;
-      display: grid; grid-template-columns: repeat(4, 1fr); gap: var(--sp-3);
+    /* ---- 대시보드 레이아웃 (좌: 차트+최근분석 / 우: 강력매수+큐) ---- */
+    .layout-grid {
+      flex: 1 1 auto; min-height: 0; display: grid;
+      grid-template-columns: minmax(0, 1fr) 384px;
+      grid-template-rows: minmax(0, 1fr); gap: var(--sp-3); align-items: stretch;
     }
-    .stat-card {
-      background: var(--card); border: 1px solid var(--border);
-      border-radius: var(--radius); padding: var(--sp-3) var(--sp-4);
-    }
-    .stat-num { font-size: 24px; font-weight: 700; line-height: 1.1;
-                font-variant-numeric: tabular-nums; }
-    .stat-label { font-size: var(--fs-cap); color: var(--ink-muted);
-                  margin-top: var(--sp-1); text-transform: uppercase;
-                  letter-spacing: .05em; }
+    .left-col  { min-height: 0; display: grid;
+                 grid-template-rows: 190px minmax(0, 1fr); gap: var(--sp-3); }
+    .right-col { min-height: 0; display: grid;
+                 grid-template-rows: minmax(0, 1fr) auto; gap: var(--sp-3); }
+    /* 분석 큐: 최대 5행은 스크롤 없이, 6행부터 스크롤. scrollbar-gutter로 스크롤바가
+       생겨도 자리를 미리 확보해 x 버튼 위치가 밀리지 않게 한다. */
+    #dash-queue .panel-body { max-height: 186px; scrollbar-gutter: stable; }
 
-    /* ---- 대시보드 그리드 (좌: 최근분석 / 우: 강력매수+실행이력) ---- */
-    .dash-grid {
-      flex: 1 1 auto; min-height: 0;
-      display: grid;
-      grid-template-columns: minmax(0, 1fr) 340px;
-      grid-template-rows: minmax(0, 1fr);   /* 단일 행이 높이를 꽉 채워 패널 내부 스크롤 */
-      gap: var(--sp-3); align-items: stretch;
-    }
-    .dash-col { display: flex; flex-direction: column;
-                gap: var(--sp-3); min-height: 0; }
+    /* ---- 콤보 차트 카드 ---- */
+    .chart-card { background: var(--card); border: 1px solid var(--border);
+      border-radius: var(--radius); display: flex; flex-direction: column;
+      min-height: 0; overflow: hidden; }
+    .chart-head { flex: 0 0 auto; padding: var(--sp-2) var(--sp-3) 0;
+      display: flex; justify-content: space-between; align-items: flex-start; gap: var(--sp-3); }
+    .chart-kpi { font-size: 18px; font-weight: 700; line-height: 1.05;
+      font-variant-numeric: tabular-nums; }
+    .chart-kpi .unit { font-size: var(--fs-cap); font-weight: 600;
+      color: var(--ink-muted); margin-left: 3px; }
+    .chart-kpi .kpi-sep { font-size: 13px; font-weight: 600; color: var(--ink-2);
+      margin-left: var(--sp-2); }
+    .chart-legend { display: flex; gap: var(--sp-3); justify-content: flex-end;
+      flex-wrap: wrap; }
+    .chart-legend .lg { display: inline-flex; align-items: center; gap: 5px;
+      font-size: var(--fs-cap); color: var(--ink-2); }
+    .chart-legend .sw { width: 10px; height: 10px; border-radius: 2px;
+      display: inline-block; border: 1px solid rgba(20,23,28,.12); }
+    .chart-legend .sw-line { width: 14px; height: 0; border: 0;
+      border-top: 2px solid var(--accent); border-radius: 0; }
+    .chart-svg-wrap { flex: 1 1 auto; min-height: 0; padding: 2px var(--sp-2);
+      position: relative; }
+    .chart-svg-wrap .combo-glow { position: absolute; left: 0; top: 0;
+      pointer-events: none; }
 
     /* 마크다운 보고서 스타일은 report.html에서 .markdown(렌더 컨테이너)로 정의 */
 
@@ -302,8 +315,7 @@
     <div id="search-results"></div>
   </div>
   <div class="spacer"></div>
-  <form action="/trigger" method="post"
-        onsubmit="this.querySelector('button').disabled=true; this.querySelector('button').innerText='큐 추가 중…';">
+  <form action="/trigger" method="post" data-ajax data-busy="큐 추가 중…">
     <button type="submit" class="btn btn-sm btn-hot">▶ 핫 종목 5개 큐 추가</button>
   </form>
 </nav>
@@ -326,6 +338,53 @@ window.showToast = function (message, type) {
 };
 </script>
 
+<script>
+// ---------------------------------------------------------------------------
+// AJAX 폼 제출 — data-ajax 폼은 전체 새로고침 대신 큐 목록(#dash-queue)만 부분 교체.
+//  · 핫 종목 추가(/trigger), 수기 추가(/queue/add), 큐 삭제/일시정지/재개에 적용.
+//  · 서버가 큐 partial+토스트를 JSON으로 주면 #dash-queue만 갈아끼우고 토스트를 띄운다.
+//  · 위임(document)이라 검색 드롭다운·큐 partial이 동적으로 갈려도 그대로 동작.
+//  · 응답이 JSON이 아니면(예외) showToast로 알리고, JS가 없으면 폼은 평소대로 동작.
+// ---------------------------------------------------------------------------
+document.addEventListener('submit', async (e) => {
+  const form = e.target;
+  if (!(form instanceof HTMLFormElement) || !form.hasAttribute('data-ajax')) return;
+  if (e.defaultPrevented) return;     // confirm() 취소 등 다른 핸들러가 막았으면 중단
+  e.preventDefault();
+
+  const btn = form.querySelector('button[type=submit]') || form.querySelector('button');
+  if (btn && btn.disabled) return;    // 중복 제출 방지
+  const orig = btn ? btn.innerHTML : '';
+  if (btn) { btn.disabled = true; if (form.dataset.busy) btn.textContent = form.dataset.busy; }
+
+  const inDropdown = !!form.closest('#search-results');
+  try {
+    const r = await fetch(form.action, {
+      method: (form.getAttribute('method') || 'post').toUpperCase(),
+      headers: { 'X-Requested-With': 'fetch' },
+      body: new FormData(form),
+      cache: 'no-store',
+    });
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    const data = await r.json();
+    const q = document.getElementById('dash-queue');
+    if (q && typeof data.queue === 'string') q.innerHTML = data.queue;
+    if (data.toast) showToast(data.toast, data.toast_type || 'success');
+    if (inDropdown) {                 // 수기 추가 후 검색창·드롭다운 정리
+      const box = document.getElementById('search-results');
+      if (box) { box.style.display = 'none'; box.innerHTML = ''; }
+      const si = document.getElementById('search-input');
+      if (si) si.value = '';
+    }
+  } catch (err) {
+    showToast('❌ 요청 실패 — 잠시 후 다시 시도하세요.', 'danger');
+  } finally {
+    // 큐 partial 교체로 사라진 버튼은 복구 불필요. 화면에 남은 버튼만 원복.
+    if (btn && document.contains(btn)) { btn.disabled = false; btn.innerHTML = orig; }
+  }
+});
+</script>
+
 <main class="app-main">{% block body %}{% endblock %}</main>
 
 <script>
@@ -342,7 +401,7 @@ window.showToast = function (message, type) {
       const prefBadge = s.is_preferred
         ? ` <span style="background:var(--watch-bg);color:var(--watch);padding:1px 6px;border-radius:3px;font-size:10px;font-weight:600;margin-left:6px;">우선주</span>`
         : '';
-      return `<form class="item" method="post" action="/queue/add" style="margin:0">
+      return `<form class="item" method="post" action="/queue/add" data-ajax style="margin:0">
          <input type="hidden" name="ticker" value="${s.ticker}">
          <input type="hidden" name="name" value="${s.name.replace(/"/g, '&quot;')}">
          <button type="submit" style="all:unset; width:100%; display:block; cursor:pointer;">

@@ -54,7 +54,7 @@
             <span class="muted ms-1 mono">{{ r.ticker }}</span></td>
         <td>{% if pb %}<span class="pick-src {{ pb[2] }}" title="선정근거: {{ pb[1] }}">{{ pb[0] }} {{ pb[1] }}</span>{% else %}<span class="muted">–</span>{% endif %}</td>
         <td class="num mono">{{ "%.2f"|format(r.avg_rating) }}</td>
-        <td class="muted">{{ r.run_started[:16] }}</td>
+        <td class="muted" style="white-space:nowrap">{{ r.run_started[5:16]|replace('T', ' ') }}</td>
         <td><a href="/report/{{ r.id }}" class="muted">보고서 →</a></td>
         <td class="num" style="width: 24px;">
           <form method="post" action="/report/{{ r.id }}/delete?next=/?page={{ recent_page }}"

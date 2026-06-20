@@ -7,11 +7,11 @@
     {% if queue_processing %}<span title="현재 분석 중인 종목 수">▶ {{ queue_processing }} 처리중</span>{% endif %}
     <span>{{ queue_items|length }}건</span>
     {% if queue_paused %}
-      <form method="post" action="/queue/resume" style="margin:0">
+      <form method="post" action="/queue/resume" data-ajax style="margin:0">
         <button class="btn btn-sm" type="submit" title="분석 재개">▶ 재개</button>
       </form>
     {% else %}
-      <form method="post" action="/queue/pause" style="margin:0">
+      <form method="post" action="/queue/pause" data-ajax style="margin:0">
         <button class="btn btn-sm" type="submit" title="처리 중인 종목 완료 후 멈춤">⏸ 일시정지</button>
       </form>
     {% endif %}
@@ -46,7 +46,7 @@
           {% if pb %}<span class="pick-src {{ pb[2] }}" title="선정근거: {{ pb[1] }}">{{ pb[0] }} {{ pb[1] }}</span>{% endif %}
         </td>
         <td class="num" style="width: 24px;">
-          <form method="post" action="/queue/{{ q.id }}/delete" style="margin:0"
+          <form method="post" action="/queue/{{ q.id }}/delete" data-ajax style="margin:0"
                 onsubmit="return confirm('큐에서 삭제하시겠어요?\n{{ q.name or q.ticker }} ({{ q.ticker }}) · {{ q.status }}');">
             <button class="btn btn-sm btn-link p-0 muted" style="border:0;">×</button>
           </form>
