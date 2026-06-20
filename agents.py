@@ -35,13 +35,40 @@ import ticker_archive
 log = logging.getLogger("agents")
 
 SUB_AGENTS = ("valuation", "industry", "price_flow", "catalyst", "risk")
-RATING_PAT = re.compile(r"RATING:\s*([0-9]\.[05]|[1-5])")
 
-# WebSearch 사용이 많은 에이전트는 turn 여유를 더 준다
+# 별점 회수. 정식 규약은 '마지막 줄 RATING: X.X'지만, 턴 상한/타임아웃으로 출력이
+# 잘리거나 모델이 약식·굵게 표기를 쓰면 그 줄이 누락된다. 그래서:
+#  1) 콜론/전각콜론·굵게(**)·0.5단위 아닌 소수까지 너그럽게 잡고(0.5로 반올림),
+#  2) RATING 토큰이 없으면 '별점 N' 한국어 프로즈도 폴백으로 건진다.
+# 여러 개 잡히면 최종(마지막) 표기를 별점으로 본다.
+_RATING_PRIMARY = re.compile(r"RATING\s*[:：]?\s*\*{0,2}\s*([0-5](?:\.[0-9])?)", re.I)
+_RATING_PROSE = re.compile(r"별\s*점[\s:：은는]*\*{0,2}\s*([1-5](?:\.[0-9])?)\s*점?")
+
+
+def _round_half(x: float) -> float:
+    """0.5 단위로 반올림 후 1.0~5.0로 클램프."""
+    return min(5.0, max(1.0, round(x * 2) / 2))
+
+
+def _parse_rating(text: str) -> float | None:
+    """본문에서 별점을 회수. 못 찾으면 None."""
+    if not text:
+        return None
+    nums = _RATING_PRIMARY.findall(text) or _RATING_PROSE.findall(text)
+    if not nums:
+        return None
+    try:
+        return _round_half(float(nums[-1]))
+    except ValueError:
+        return None
+
+# WebSearch 사용이 많은 에이전트는 turn 여유를 더 준다.
+# valuation/price_flow는 6턴이 가장 빠듯해 시세·컨센서스·수급 검증 중 턴 상한에
+# 걸려 별점(마지막 줄 RATING)을 못 뱉는 사례가 잦았다(N/A 1·2위) → 상향.
 MAX_TURNS_PER_AGENT = {
-    "valuation": 6,
+    "valuation": 10,
     "industry": 10,
-    "price_flow": 6,
+    "price_flow": 8,
     "catalyst": 12,
     "risk": 8,
 }
@@ -313,8 +340,7 @@ async def _run_one(sub_name: str, user_prompt: str,
         err = f"{type(e).__name__}: {e}"
         log.exception("[%s] 실패", sub_name)
     text = "\n".join(pieces).strip()
-    m = RATING_PAT.search(text)
-    rating = float(m.group(1)) if m else None
+    rating = _parse_rating(text)
     return SubAgentResult(
         name=sub_name, text=text, rating=rating,
         tokens_in=tokens_in, tokens_out=tokens_out,

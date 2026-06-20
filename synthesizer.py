@@ -110,8 +110,22 @@ def _build_synth_prompt(candidate: selector.Candidate,
         r = analysis.sub_results.get(sub_name)
         if not r:
             continue
-        lines.append(f"## [{sub_name}] 별점={r.rating}")
-        lines.append(r.text or "(빈 결과)")
+        text = (r.text or "").strip()
+        if r.rating is not None:
+            lines.append(f"## [{sub_name}] 별점={r.rating}")
+            lines.append(text or "(빈 결과)")
+        elif text:
+            # 별점은 못 뽑았지만(턴 상한/타임아웃으로 마지막 줄 절단) 부분 분석은 남았다.
+            # 이 영역을 N/A로 버리지 말고, 아래 부분 내용을 근거·요지로 활용하라.
+            lines.append(f"## [{sub_name}] 별점=미산정(부분 보고 — 분석 중단)")
+            lines.append("_별점은 미상이나 아래 부분 분석은 유효하다. 매트릭스 점수 칸은 "
+                         "`미상`으로 두되 요지 칸엔 아래 내용 핵심을 적어라. 'N/A·보고 누락'으로 "
+                         "버리지 말 것(평균 계산에서만 제외)._")
+            lines.append(text)
+        else:
+            # 본문 자체가 빈 경우만 진짜 '보고 없음'.
+            lines.append(f"## [{sub_name}] 별점=미산정(보고 없음)")
+            lines.append("(빈 결과 — 이 영역만 N/A 처리하고 평균에서 제외)")
         lines.append("")
     return "\n".join(lines)
 
