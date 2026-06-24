@@ -24,3 +24,6 @@ _diag*.py
 
 # 포터블 메모리(개인 투자 성향·피드백·종목 메모). public repo에 올리지 않는다.
 memory/
+
+# UI 작업 참고용 외부 디자인 스킬 모음(타 저작물·LICENSE 포함). 로컬 참고용, public repo 비노출.
+taste-skills/

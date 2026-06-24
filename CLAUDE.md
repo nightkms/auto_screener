@@ -49,7 +49,7 @@ python scheduler.py           # 상주: 대시보드(127.0.0.1:8765) + 매시각
    reset_failed_to_pending → enqueue_hot_picks(auto_hourly)
         │
         ▼
-selector.py     검색 상위 → dedup → 부족분 시총 z-score 보강 → top 5  (0건 허용)
+selector.py     검색상위 → 상한가·거래량 급증 → 부족분 시총 z-score → top 5  (0건 허용)
         │
         ▼
 data_loader.py  DART OpenAPI: 회사·재무·최근 공시 + 네이버 시세
@@ -73,7 +73,7 @@ synthesizer.py  Claude Opus: 5개 보고 종합 + 등급(STRONG/WATCH/INTEREST/S
 | `scheduler.py` | 상주 entry point. FastAPI(uvicorn) + APScheduler hourly 잡 + 부팅 복구 |
 | `dashboard.py` | FastAPI 라우트, 큐 워커, 가격감시 워커, 보고서 Q&A 엔드포인트 |
 | `config.py` | `.env` 로더·검증. 모든 설정·경로의 단일 출처 |
-| `selector.py` | hot pick 선정 (2단계, [정책](docs/design/selector.md)) |
+| `selector.py` | hot pick 선정 (3단계, [정책](docs/design/selector.md)) |
 | `data_loader.py` | DART/네이버 수집, 분석 컨텍스트 패킹 |
 | `agents.py` | 5개 서브에이전트 병렬 실행 (`MAX_TURNS_PER_AGENT`, sub별 timeout) |
 | `synthesizer.py` | 종합·등급 판정 (fallback rule 포함) |
@@ -114,8 +114,8 @@ Windows 상주 백그라운드 기동은 `start_screener.bat`(→ `start_helper.
 - 수집 자료는 출처를 남긴다 → [source-tracking](docs/design/source-tracking.md).
 
 ### selector
-- 검색상위 우선 → 부족분만 시총 보강, dedup 유지, **0건은 정상**.
-  윈도우(30일)를 임의로 줄이지 말 것 → [selector](docs/design/selector.md).
+- 검색상위 우선 → 상한가·거래량 급증 보강 → 부족분만 시총 z-score(="일반") 보강, dedup 유지,
+  **0건은 정상**. 윈도우(30일)를 임의로 줄이지 말 것 → [selector](docs/design/selector.md).
 
 ### 공시 수집
 - 제목만으론 호재/악재가 안 드러나는 공시(지분·주요사항 등)는 본문 원문을 받아 요약해
