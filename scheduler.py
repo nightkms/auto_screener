@@ -39,31 +39,49 @@ log = logging.getLogger("scheduler")
 # 인증 만료 알림: 만료가 지속되는 동안 이 간격으로만 재알림(스팸 방지).
 _AUTH_ALERT_KEY = "auth_alert_sent_at"
 _AUTH_ALERT_GAP_S = 6 * 3600
-# 홈 토큰 만료 이 시간 전부터 keepalive 선제 갱신 시도(>1h: 매시각 점검이 한 번은 잡음).
-_KEEPALIVE_THRESHOLD_S = 75 * 60
+# 홈 토큰 만료 이 시간 전부터 keepalive 선제 갱신 시도. 정각 점검이므로 만료 전
+# 최소 2번(약 2h/1h 전)은 잡히도록 2시간으로 둔다. CLI는 만료가 실제로 임박했을 때만
+# refresh를 발동하므로 진입 여유만 넓힐 뿐이고, 갱신 성사는 아래 재시도가 담당한다.
+_KEEPALIVE_THRESHOLD_S = 120 * 60
+# keepalive가 정각 1회로 갱신에 실패하면(만료 시각이 정각과 어긋나 놓치는 경우 등)
+# 같은 잡 안에서 짧게 재시도한다. 다음 정각(1h 뒤)엔 이미 만료라 자동 복구가 불가능하기
+# 때문 — 한 번 놓치면 그걸로 끝나던 구조를 막는다.
+_KEEPALIVE_MAX_ATTEMPTS = 3
+_KEEPALIVE_RETRY_GAP_S = 20
 
 
 async def _keepalive_refresh_home_if_needed():
-    """홈 OAuth 토큰이 곧 만료(또는 이미 만료)면 claude를 직접 1회 돌려 갱신한다.
-    성공하면 무인 상태에서도 인증이 자동 연장된다(다음 copy로 격리본 반영). 실패하면
-    이어지는 만료 점검이 텔레그램으로 알린다. 반드시 홈을 갱신해 대화형 세션과
-    리프레시 토큰 회전 충돌을 피한다(agents.keepalive_refresh가 env={}로 홈 사용)."""
+    """홈 OAuth 토큰이 곧 만료(또는 이미 만료)면 claude를 직접 돌려 갱신한다.
+    성공하면 무인 상태에서도 인증이 자동 연장된다(다음 copy로 격리본 반영). 정각 1회
+    시도가 실패하면 다음 정각(1h 뒤)엔 이미 만료돼 복구가 불가능하므로, 갱신이 확인될
+    때까지 같은 잡 안에서 짧게 재시도한다. 끝까지 실패하면 이어지는 만료 점검이 격리본
+    만료 시 텔레그램으로 알린다. 반드시 홈을 갱신해 대화형 세션과 리프레시 토큰 회전
+    충돌을 피한다(agents.keepalive_refresh가 env={}로 홈 사용)."""
     try:
         home_left = config.home_credential_seconds_left()
     except Exception:
         return
     if home_left is None or home_left > _KEEPALIVE_THRESHOLD_S:
         return
-    log.info("홈 토큰 만료 임박(%.0f분 남음) → keepalive 갱신 시도", home_left / 60)
-    try:
-        await agents.keepalive_refresh()
+    log.info("홈 토큰 만료 임박(%.0f분 남음) → keepalive 갱신 시도(최대 %d회)",
+             home_left / 60, _KEEPALIVE_MAX_ATTEMPTS)
+    for attempt in range(1, _KEEPALIVE_MAX_ATTEMPTS + 1):
+        try:
+            await agents.keepalive_refresh()
+        except Exception:
+            # 만료된 토큰으로는 갱신 쿼리 자체가 인증 실패(예외)로 끝난다 — 남은
+            # 재시도가 있으면 계속 시도하고, 없으면 아래 경고로 마무리한다.
+            log.warning("홈 토큰 keepalive 시도 %d/%d 예외", attempt,
+                        _KEEPALIVE_MAX_ATTEMPTS, exc_info=True)
         new_left = config.home_credential_seconds_left()
         if new_left is not None and new_left > home_left + 60:
-            log.info("홈 토큰 keepalive 갱신 성공 (만료까지 %.1fh)", new_left / 3600)
-        else:
-            log.warning("홈 토큰 keepalive 후에도 갱신 안 됨 (리프레시 토큰 만료 의심)")
-    except Exception:
-        log.exception("홈 토큰 keepalive 갱신 실패")
+            log.info("홈 토큰 keepalive 갱신 성공 (만료까지 %.1fh, %d회째)",
+                     new_left / 3600, attempt)
+            return
+        if attempt < _KEEPALIVE_MAX_ATTEMPTS:
+            await asyncio.sleep(_KEEPALIVE_RETRY_GAP_S)
+    log.warning("홈 토큰 keepalive %d회 후에도 갱신 안 됨 (리프레시 토큰 만료 의심)",
+                _KEEPALIVE_MAX_ATTEMPTS)
 
 
 async def _check_credentials_and_alert():
