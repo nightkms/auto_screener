@@ -77,7 +77,13 @@ def _build_dashboard_context(request: Request) -> dict[str, Any]:
         page = max(1, int(request.query_params.get("page", "1")))
     except ValueError:
         page = 1
-    per_page = 10
+    # per_page는 클라이언트(fitRecent)가 화면 높이에 맞춰 넘겨 스크롤 없이 꽉 채운다.
+    # 없거나 이상값이면 기본 10, 폭주 방지로 3~60 clamp.
+    try:
+        per_page = int(request.query_params.get("per_page", "10"))
+    except ValueError:
+        per_page = 10
+    per_page = max(3, min(60, per_page))
 
     # 등급 필터 (?grade=STRONG&grade=WATCH...). 비어있으면 전체.
     VALID_GRADES = ("STRONG", "WATCH", "INTEREST", "SKIP")
@@ -102,6 +108,7 @@ def _build_dashboard_context(request: Request) -> dict[str, Any]:
         "recent_page": page,
         "recent_total_pages": recent_total_pages,
         "recent_total": recent_total,
+        "recent_per_page": per_page,
         "grade_filter": list(grade_filter),
         "all_grades": list(VALID_GRADES),
         "search_q": q_raw,

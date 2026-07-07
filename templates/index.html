@@ -135,6 +135,78 @@
 })();
 </script>
 
+<script>
+// ---------------------------------------------------------------------------
+// 최근 분석 패널 높이맞춤 — 목록이 스크롤 없이 화면에 꽉 차도록 per_page를
+// 뷰포트 높이에 맞춰 계산해 서버에 다시 요청한다(리사이즈에도 대응).
+//  · panel-body 가용높이 ÷ 행높이 = 들어갈 행 수 → ?per_page=N.
+//  · per_page를 URL에 반영하므로 폴링 갱신·페이지네이션 링크가 값을 그대로 유지.
+//  · per_page를 줄이면 페이지네이션(foot)이 생겨 body가 다시 줄 수 있으니, 스크롤이
+//    남아있으면 한 칸씩 줄여 수렴한다(최대 5회, auto 스크롤이 최종 안전망).
+// ---------------------------------------------------------------------------
+(function () {
+  const panel = document.getElementById('dash-recent');
+  if (!panel) return;
+  const ROW_FALLBACK = 34;               // tbody tr을 못 재면 쓸 근사 행높이(px)
+  const MIN_PP = 3, MAX_PP = 60;
+  let busy = false;
+
+  function curPerPage() {
+    const v = parseInt(new URL(window.location).searchParams.get('per_page') || '10', 10);
+    return isNaN(v) ? 10 : v;
+  }
+
+  // panel-body에 스크롤 없이 들어갈 행 수. 잴 수 없으면 null.
+  function targetRows() {
+    const body = panel.querySelector('.panel-body');
+    if (!body) return null;
+    const thead = body.querySelector('thead');
+    const row = body.querySelector('tbody tr');
+    const rowH = (row && row.offsetHeight) || ROW_FALLBACK;
+    const theadH = (thead && thead.offsetHeight) || 0;
+    const avail = body.clientHeight - theadH;
+    if (avail <= 0 || rowH <= 0) return null;
+    return Math.max(MIN_PP, Math.min(MAX_PP, Math.floor(avail / rowH)));
+  }
+
+  async function reloadRecent(pp) {
+    const u = new URL(window.location);
+    u.searchParams.set('per_page', pp);
+    history.replaceState(null, '', u.pathname + u.search + u.hash);
+    const r = await fetch('/api/dashboard' + (u.search || ''),
+                          { headers: { 'Accept': 'application/json' }, cache: 'no-store' });
+    if (!r.ok) return;
+    const data = await r.json();
+    if (typeof data.recent === 'string') panel.innerHTML = data.recent;
+  }
+
+  async function fit() {
+    if (busy) return;
+    busy = true;
+    try {
+      for (let i = 0; i < 5; i++) {
+        const body = panel.querySelector('.panel-body');
+        const target = targetRows();
+        if (!body || target == null) break;
+        const cur = curPerPage();
+        const overflow = body.scrollHeight > body.clientHeight + 2;
+        if (target === cur && !overflow) break;         // 딱 맞음 → 종료
+        // 스크롤이 남았으면 무조건 현재보다 작게, 아니면 계산된 목표로.
+        let pp = overflow ? Math.min(target, cur - 1) : target;
+        pp = Math.max(MIN_PP, Math.min(MAX_PP, pp));
+        if (pp === cur) break;                           // 더 조정할 곳 없음
+        await reloadRecent(pp);
+      }
+    } finally { busy = false; }
+  }
+
+  window.fitRecent = fit;
+  let rt = null;
+  window.addEventListener('resize', () => { clearTimeout(rt); rt = setTimeout(fit, 160); });
+  requestAnimationFrame(() => requestAnimationFrame(fit));   // 초기 레이아웃 안정 후 맞춤
+})();
+</script>
+
 <!-- 콤보 차트 (Chart.js) -->
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
 <script>window.CHART_SERIES = {{ chart_series|tojson }};</script>

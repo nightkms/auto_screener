@@ -71,7 +71,8 @@
   </table>
 </div>
 {% if recent_total_pages > 1 %}
-{% set filter_qs = grade_qs + q_qs %}
+{# per_page(화면맞춤 개수)를 페이지 이동에도 유지해 스크롤이 재발하지 않게 한다 #}
+{% set filter_qs = grade_qs + q_qs + '&per_page=' + recent_per_page|string %}
 <div class="panel-foot">
   <nav>
     <ul class="pagination pagination-sm mb-0">
