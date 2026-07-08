@@ -211,7 +211,8 @@ async def notify_single_report(report_id: int,
 
     알림 정책 (source별):
     - 'manual' / 'telegram': 등급 무관 무조건 전송 (사용자가 직접 지정한 종목)
-    - 'auto_weekly' / 'auto_hourly': grade=='STRONG' 일 때만 전송 (자동 스크리닝)
+    - 'auto_weekly' / 'auto_hourly': grade=='STRONG' **또는** 향후 1~2년 실적변화
+      이벤트(earnings_event)가 잡힌 종목이면 전송 (그 외 등급은 skip)
     """
     with storage._connect() as c:
         row = c.execute("SELECT * FROM reports WHERE id=?",
@@ -220,8 +221,11 @@ async def notify_single_report(report_id: int,
         log.warning("report %d 없음", report_id)
         return False
     r = dict(row)
-    if source in ("auto_weekly", "auto_hourly") and r.get("grade") != "STRONG":
-        log.info("[skip alert] report=%d %s grade=%s (%s는 STRONG만 알림)",
+    event_note = (r.get("earnings_event") or "").strip()
+    if (source in ("auto_weekly", "auto_hourly")
+            and r.get("grade") != "STRONG" and not event_note):
+        log.info("[skip alert] report=%d %s grade=%s (%s는 STRONG 또는 "
+                 "실적변화 이벤트만 알림)",
                  report_id, r.get("ticker"), r.get("grade"), source)
         return False
     emoji = EMOJI.get(r["grade"], "❓")
@@ -232,11 +236,14 @@ async def notify_single_report(report_id: int,
         "auto_hourly": "⏱️ 시간자동",
     }.get(source, source)
     report_url = config.dashboard_url(f"/report/{report_id}")
-    header = (
-        f"{emoji} {r['name']} ({r['ticker']}) — {src_tag}\n"
-        f"등급 {r['grade']} · 평균 ★ {r['avg_rating']}\n"
-        f"보고서: {report_url}"
-    )
+    head_lines = [
+        f"{emoji} {r['name']} ({r['ticker']}) — {src_tag}",
+        f"등급 {r['grade']} · 평균 ★ {r['avg_rating']}",
+    ]
+    if event_note:
+        head_lines.append(f"🏭 실적변화 이벤트(1~2년): {event_note}")
+    head_lines.append(f"보고서: {report_url}")
+    header = "\n".join(head_lines)
     md_path = config.resolve_report_md(r["md_path"]) if r.get("md_path") else None
     if md_path and md_path.exists():
         body = _strip_markdown(md_path.read_text(encoding="utf-8"))

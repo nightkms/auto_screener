@@ -135,6 +135,7 @@ async def run_once(top_n: int = config.TOP_N,
                     elapsed_s=report.elapsed_s,
                     sub_ratings=sub_info,
                     pick_source=c.source_tag,
+                    earnings_event=report.earnings_event,
                 )
                 # 종목별 폴더에 보고서 사본 + 메타(등급·요약) 갱신.
                 # 원자료(공시/뉴스)는 누적 안 함 (매번 새로 받음).
@@ -313,6 +314,7 @@ async def run_for_ticker(ticker: str, name: str = "",
             elapsed_s=report.elapsed_s,
             sub_ratings=sub_info,
             pick_source=cand.source_tag,
+            earnings_event=report.earnings_event,
         )
         # 종목별 폴더에 보고서 사본 + 메타(등급·요약) 갱신.
         # 원자료(공시/뉴스)는 누적 안 함 (매번 새로 받음).

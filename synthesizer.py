@@ -37,6 +37,21 @@ Grade = Literal["STRONG", "WATCH", "INTEREST", "SKIP"]
 GRADE_PAT = re.compile(r"GRADE:\s*(STRONG|WATCH|INTEREST|SKIP)")
 GRADE_RANK = {"STRONG": 3, "WATCH": 2, "INTEREST": 1, "SKIP": 0}
 
+# 향후 1~2년 실적을 구조적으로 바꿀 이벤트(공장 증설/독점공급/대규모 수주 등) 판정.
+# 등급과 독립 — SKIP이어도 YES면 텔레그램 알림 대상(notifier 게이트).
+_EVENT_PAT = re.compile(
+    r"EARNINGS_EVENT:\s*(YES|NO)(?:\s*[—:\-]+\s*(.+))?", re.I)
+
+
+def _parse_earnings_event(markdown: str) -> str:
+    """종합 본문에서 EARNINGS_EVENT 토큰을 읽어 '이벤트 요약'을 반환.
+    YES면 요약 노트(없으면 기본 문구), NO/미출력이면 빈 문자열(=이벤트 없음)."""
+    m = _EVENT_PAT.search(markdown or "")
+    if not m or m.group(1).upper() != "YES":
+        return ""
+    note = (m.group(2) or "").strip().splitlines()[0].strip() if m.group(2) else ""
+    return note or "중장기 실적 변화 이벤트"
+
 # Claude Max 구독 한도 초과 등 "회복 가능한" 실패 신호. 종합 응답이 분석이 아니라
 # 이런 안내문이면 보고서로 저장하면 안 되고(좀비 보고서), 큐가 다음에 재시도해야 한다.
 _LIMIT_PAT = re.compile(r"hit your limit|usage limit|rate limit|resets?\s+\d", re.I)
@@ -55,6 +70,7 @@ class FinalReport:
     avg_rating: float
     sub_ratings: dict[str, float | None]
     markdown: str
+    earnings_event: str = ""   # 비면 이벤트 없음. 값 있으면 향후 1~2년 실적변화 이벤트 요약
     tokens_in: int = 0
     tokens_out: int = 0
     elapsed_s: float = 0.0
@@ -172,6 +188,7 @@ async def synthesize(candidate: selector.Candidate,
 
     m = GRADE_PAT.search(markdown)
     grade: Grade = m.group(1) if m else _rule_grade(sub_ratings)  # type: ignore
+    earnings_event = _parse_earnings_event(markdown)
 
     # 종합이 예외로 끊겼거나, 본문이 비었거나, 한도초과 안내문이면 실패로 본다.
     # → pipeline이 보고서를 저장하지 않고 큐에 재시도를 떠넘긴다(좀비 보고서 방지).
@@ -182,7 +199,7 @@ async def synthesize(candidate: selector.Candidate,
     return FinalReport(
         ticker=candidate.ticker, name=analysis.name, grade=grade,
         avg_rating=avg, sub_ratings=sub_ratings,
-        markdown=markdown,
+        markdown=markdown, earnings_event=earnings_event,
         tokens_in=tokens_in, tokens_out=tokens_out,
         elapsed_s=round(time.time() - started, 1),
         ok=ok,
@@ -206,6 +223,7 @@ async def _cli_single(ticker: str) -> None:
     report = await synthesize(cand, analysis)
     print("\n" + "=" * 70)
     print(f"GRADE: {report.grade}   avg★={report.avg_rating}")
+    print(f"EARNINGS_EVENT: {report.earnings_event or '(없음)'}")
     print("=" * 70)
     print(report.markdown[:3000])
 
