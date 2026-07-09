@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from datetime import date, datetime
 from pathlib import Path
 from typing import Any
 
@@ -23,6 +24,7 @@ from fastapi.templating import Jinja2Templates
 import config
 import data_loader
 import pipeline
+import price_history
 import report_chat
 import storage
 import ticker_archive
@@ -277,6 +279,45 @@ async def ticker_history(request: Request, ticker: str):
              "latest_rating": ratings[0] if ratings else None,
          }},
     )
+
+
+@app.get("/ticker/{ticker}/performance")
+def ticker_performance(ticker: str, report_id: int) -> JSONResponse:
+    """특정 분석 회차(report_id) 기준 성과 — 분석일 대비 +1/3/6/12개월 주가 수익률.
+
+    가격은 야후(분할보정 close) 主 / 네이버 원종가 fallback (price_history).
+    sync def이므로 FastAPI가 스레드풀에서 실행 → requests 블로킹이 이벤트루프를 막지 않음.
+    """
+    ticker = ticker.strip()
+    if not (ticker.isdigit() and len(ticker) == 6):
+        raise HTTPException(400, "ticker must be 6 digits")
+    with storage._connect() as c:
+        row = c.execute(
+            """SELECT r.id, r.name, r.grade, runs.started_at
+               FROM reports r JOIN runs ON r.run_id = runs.id
+               WHERE r.id=? AND r.ticker=?""",
+            (report_id, ticker),
+        ).fetchone()
+    if not row:
+        raise HTTPException(404, "이 종목의 해당 회차 보고서를 찾을 수 없습니다.")
+    started = row["started_at"] or ""
+    try:
+        base_dt = datetime.fromisoformat(started).date()
+    except ValueError:
+        base_dt = date.fromisoformat(started[:10])
+
+    market = ""
+    try:
+        info = data_loader.lookup_ticker(ticker)
+        market = (info or {}).get("market", "")
+    except Exception as e:
+        log.warning("[%s] market lookup 실패(성과조회): %s", ticker, e)
+
+    result = price_history.compute_performance(ticker, market, base_dt)
+    result["report_id"] = report_id
+    result["grade"] = row["grade"]
+    result["base_date"] = base_dt.isoformat()
+    return JSONResponse(result)
 
 
 @app.get("/report/{report_id}", response_class=HTMLResponse)
