@@ -22,10 +22,12 @@ import asyncio
 import logging
 import time
 from contextlib import asynccontextmanager
+from datetime import datetime, timedelta, timezone as _dt_timezone
 
 import uvicorn
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
+from apscheduler.triggers.date import DateTrigger
 
 import agents
 import config
@@ -39,55 +41,114 @@ log = logging.getLogger("scheduler")
 # 인증 만료 알림: 만료가 지속되는 동안 이 간격으로만 재알림(스팸 방지).
 _AUTH_ALERT_KEY = "auth_alert_sent_at"
 _AUTH_ALERT_GAP_S = 6 * 3600
-# 홈 토큰 만료 이 시간 전부터 keepalive 선제 갱신 시도. 정각 점검이므로 만료 전
-# 최소 2번(약 2h/1h 전)은 잡히도록 2시간으로 둔다. CLI는 만료가 실제로 임박했을 때만
-# refresh를 발동하므로 진입 여유만 넓힐 뿐이고, 갱신 성사는 아래 재시도가 담당한다.
-_KEEPALIVE_THRESHOLD_S = 120 * 60
-# keepalive가 정각 1회로 갱신에 실패하면(만료 시각이 정각과 어긋나 놓치는 경우 등)
-# 같은 잡 안에서 짧게 재시도한다. 다음 정각(1h 뒤)엔 이미 만료라 자동 복구가 불가능하기
-# 때문 — 한 번 놓치면 그걸로 끝나던 구조를 막는다.
-_KEEPALIVE_MAX_ATTEMPTS = 3
-_KEEPALIVE_RETRY_GAP_S = 20
+# ── 홈 토큰 keepalive ─────────────────────────────────────────────────────
+# 갱신의 주 경로는 '만료 _KEEPALIVE_LEAD_S 전'에 발화하는 원샷 타이머다
+# (_schedule_keepalive_timer). 정각 격자에만 의존하면 만료 시각이 정각 사이에
+# 떨어질 때 갱신 기회를 통째로 놓친다 — CLI는 만료가 실제로 임박했을 때만 refresh를
+# 발동하므로, 잔여가 넉넉한 시점의 ping은 성공해도 토큰이 그대로다.
+# (2026-08-06 사고: 만료 05:38 → 05:00 정각 ping은 잔여 39분이라 refresh 미발동,
+#  다음 기회인 06:00엔 이미 만료 → 리프레시 토큰 회전으로 자력 복구 불가)
+_KEEPALIVE_LEAD_S = 6 * 60
+# 타이머 발화 후 갱신이 확인될 때까지 이 간격으로 계속 재시도한다. CLI가 실제로
+# refresh를 발동하는 임계를 알 수 없으므로 만료 직전까지 반복해 확실히 걸리게 한다.
+_KEEPALIVE_TIGHT_GAP_S = 60
+# 만료 직후 이 시간까지는 한 번 더 시도한다(시계 오차·직전 시도 실패 보정).
+_KEEPALIVE_TAIL_S = 30
+# 타이머를 놓쳐도(sleep/wake) 깨어난 뒤 실행되도록 두는 유예.
+_KEEPALIVE_MISFIRE_GRACE_S = 3600
+
+_sched: AsyncIOScheduler | None = None
 
 
-async def _keepalive_refresh_home_if_needed():
-    """홈 OAuth 토큰이 곧 만료(또는 이미 만료)면 claude를 직접 돌려 갱신한다.
-    성공하면 무인 상태에서도 인증이 자동 연장된다(다음 copy로 격리본 반영). 정각 1회
-    시도가 실패하면 다음 정각(1h 뒤)엔 이미 만료돼 복구가 불가능하므로, 갱신이 확인될
-    때까지 같은 잡 안에서 짧게 재시도한다. 끝까지 실패하면 이어지는 만료 점검이 격리본
-    만료 시 텔레그램으로 알린다. 반드시 홈을 갱신해 대화형 세션과 리프레시 토큰 회전
-    충돌을 피한다(agents.keepalive_refresh가 env={}로 홈 사용)."""
-    try:
-        home_left = config.home_credential_seconds_left()
-    except Exception:
-        return
-    if home_left is None or home_left > _KEEPALIVE_THRESHOLD_S:
-        return
-    log.info("홈 토큰 만료 임박(%.0f분 남음) → keepalive 갱신 시도(최대 %d회)",
-             home_left / 60, _KEEPALIVE_MAX_ATTEMPTS)
-    for attempt in range(1, _KEEPALIVE_MAX_ATTEMPTS + 1):
+async def _keepalive_push_until_refreshed() -> bool:
+    """홈 토큰이 실제로 갱신될 때까지 짧은 간격으로 ping을 반복한다.
+
+    ping 1회는 성공해도 CLI가 refresh를 발동하지 않으면 만료 시각이 그대로다 —
+    그래서 '호출 성공'이 아니라 **만료 시각이 밀렸는지**를 성공 기준으로 삼고,
+    밀릴 때까지(또는 만료될 때까지) 재시도한다. 반드시 홈을 갱신해야 대화형 세션과
+    리프레시 토큰 회전 충돌이 나지 않는다(agents.keepalive_refresh가 env={}로 홈 사용).
+    """
+    before = config.home_credential_seconds_left()
+    if before is None:
+        return False
+    if before <= 0:
+        # 만료 후엔 리프레시 토큰이 회전돼 CLI가 자력으로 살리지 못한다(/login만이 답).
+        log.warning("홈 토큰 이미 만료(%.0f분 경과) → keepalive로 복구 불가, /login 필요",
+                    -before / 60)
+        return False
+    deadline = time.time() + before + _KEEPALIVE_TAIL_S
+    attempt = 0
+    while True:
+        attempt += 1
         try:
             await agents.keepalive_refresh()
         except Exception:
-            # 만료된 토큰으로는 갱신 쿼리 자체가 인증 실패(예외)로 끝난다 — 남은
-            # 재시도가 있으면 계속 시도하고, 없으면 아래 경고로 마무리한다.
-            log.warning("홈 토큰 keepalive 시도 %d/%d 예외", attempt,
-                        _KEEPALIVE_MAX_ATTEMPTS, exc_info=True)
-        new_left = config.home_credential_seconds_left()
-        if new_left is not None and new_left > home_left + 60:
+            # 인증 실패는 SDK에서 'error result: success'로 위장돼 예외로 올라온다.
+            log.warning("홈 토큰 keepalive 시도 %d 예외", attempt, exc_info=True)
+        left = config.home_credential_seconds_left()
+        if left is not None and left > before + 60:
             log.info("홈 토큰 keepalive 갱신 성공 (만료까지 %.1fh, %d회째)",
-                     new_left / 3600, attempt)
-            return
-        if attempt < _KEEPALIVE_MAX_ATTEMPTS:
-            await asyncio.sleep(_KEEPALIVE_RETRY_GAP_S)
+                     left / 3600, attempt)
+            config.sdk_env()                    # 격리본에 즉시 반영
+            return True
+        if time.time() >= deadline or (left is not None and left <= 0):
+            break
+        await asyncio.sleep(_KEEPALIVE_TIGHT_GAP_S)
     log.warning("홈 토큰 keepalive %d회 후에도 갱신 안 됨 (리프레시 토큰 만료 의심)",
-                _KEEPALIVE_MAX_ATTEMPTS)
+                attempt)
+    return False
+
+
+async def _keepalive_timer_fire():
+    """만료 직전에 발화하는 원샷 잡. 갱신 성패와 무관하게 다음 타이머를 재예약한다."""
+    left = config.home_credential_seconds_left()
+    log.info("keepalive 타이머 발화 (만료까지 %s)",
+             f"{left / 60:.0f}분" if left is not None else "미상")
+    try:
+        await _keepalive_push_until_refreshed()
+    finally:
+        _schedule_keepalive_timer()
+
+
+def _schedule_keepalive_timer():
+    """홈 토큰 만료 _KEEPALIVE_LEAD_S 전에 원샷 keepalive 잡을 건다(재호출 시 교체).
+
+    만료 시각이 정각과 어떻게 어긋나도 갱신 기회를 반드시 갖게 하는 주 경로다.
+    정각 점검·타이머 발화 때마다 다시 불려 만료 시각 변화(대화형 세션이 갱신한 경우
+    등)에 재동기화된다. 이미 만료됐으면 걸지 않는다 — 자력 복구가 불가능해 재시도
+    루프만 돌기 때문이고, /login 후 다음 정각 점검이 다시 타이머를 세운다."""
+    if _sched is None:
+        return
+    try:
+        left = config.home_credential_seconds_left()
+    except Exception:
+        return
+    if left is None or left <= 0:
+        return
+    # LEAD 안쪽이면 곧바로(수 초 뒤) 발화 — 정각 잡을 블록하지 않도록 잡으로 넘긴다.
+    run_at = datetime.now(_dt_timezone.utc) + timedelta(
+        seconds=max(left - _KEEPALIVE_LEAD_S, 5.0))
+    try:
+        _sched.add_job(
+            _keepalive_timer_fire,
+            trigger=DateTrigger(run_date=run_at),
+            id="keepalive_timer",
+            replace_existing=True,
+            max_instances=1,
+            coalesce=True,
+            misfire_grace_time=_KEEPALIVE_MISFIRE_GRACE_S,
+        )
+    except Exception:
+        log.exception("keepalive 타이머 예약 실패")
+        return
+    log.info("keepalive 타이머 예약: %s (홈 토큰 만료 %.0f분 전)",
+             run_at.astimezone().strftime("%m-%d %H:%M:%S"), _KEEPALIVE_LEAD_S / 60)
 
 
 async def _check_credentials_and_alert():
     """서브프로세스가 쓸 OAuth 토큰을 홈에서 갱신·점검하고, 만료면 텔레그램으로
     알린다(dedup). 사용자가 원격 재로그인하면 다음 정각에 자동 복구된다."""
-    await _keepalive_refresh_home_if_needed()   # 만료 임박 시 홈 토큰 선제 자가 갱신
+    _schedule_keepalive_timer()                # 만료 시각 기준 타이머 재동기화
     try:
         config.sdk_env()                       # 홈의 신선본을 격리본으로 끌어옴
         left = config.credential_seconds_left()
@@ -140,6 +201,7 @@ async def _scheduled_run():
 
 @asynccontextmanager
 async def lifespan(app):
+    global _sched
     storage.init_db()
     n = storage.cleanup_stale_runs()
     if n:
@@ -164,7 +226,9 @@ async def lifespan(app):
         misfire_grace_time=1800,
     )
     sched.start()
+    _sched = sched
     log.info("스케줄러 시작: hourly (every :00) TZ=%s", config.TIMEZONE)
+    _schedule_keepalive_timer()                # 부팅 직후 만료 타이머 장전
     # 백그라운드 워커들 (큐 + 가격 알림)
     queue_task = asyncio.create_task(dashboard.queue_worker())
     price_task = asyncio.create_task(dashboard.price_watch_worker())
@@ -178,6 +242,7 @@ async def lifespan(app):
             except asyncio.CancelledError:
                 pass
         sched.shutdown()
+        _sched = None
 
 
 # dashboard.app에 lifespan 부착 (단일 ASGI app으로 노출)
