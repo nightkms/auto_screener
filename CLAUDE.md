@@ -61,7 +61,8 @@ agents.py       Claude Sonnet × 5 병렬 (valuation/industry/price_flow/catalys
 synthesizer.py  Claude Opus: 5개 보고 종합 + 등급(STRONG/WATCH/INTEREST/SKIP)
         │
         ├──► storage.py     SQLite + analysis/auto/<주차>/*.md
-        └──► notifier.py    텔레그램 (auto_hourly는 STRONG 또는 1~2년 실적변화 이벤트만)
+        └──► notifier.py    텔레그램 2단계 푸시(요약 → 상세)
+                            (auto_hourly = STRONG 또는 1~2년 실적변화 이벤트, SKIP 제외)
 ```
 
 큐 워커·가격 알림 워커는 `dashboard.py`에 있고 `scheduler.lifespan`이 백그라운드 태스크로 띄운다.
