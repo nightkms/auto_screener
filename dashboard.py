@@ -592,6 +592,35 @@ async def trigger(request: Request):
     return RedirectResponse(url=f"/?hot={added}", status_code=303)
 
 
+@app.post("/trigger/event")
+async def trigger_event(request: Request):
+    """최근 분석 종목 중 오늘 급변한 종목을 30일 dedup 무시하고 큐에 추가.
+
+    매시각 정각에 스케줄러가 이미 돌리지만(scheduler._scheduled_run), 장중에
+    바로 확인하고 싶을 때를 위한 수동 실행이다. 이벤트 픽은 priority=1이라
+    큐에 이미 쌓인 정기 핫픽보다 먼저 처리된다."""
+    import event_watch
+    try:
+        added, tickers = await event_watch.enqueue_event_picks()
+    except Exception:
+        log.exception("이벤트 종목 큐 추가 실패")
+        if _wants_json(request):
+            return _queue_json(
+                request, "❌ 급변 종목 감지 실패 (logs/screener.err.log 확인)", "danger")
+        return RedirectResponse(url="/?err=enqueue", status_code=303)
+    if _wants_json(request):
+        if added == 0:
+            return _queue_json(
+                request, "⚠ 새로 감지된 급변 종목 없음 — 오늘 잡힌 이벤트는 이미 "
+                "큐에 넣었거나, 기준(당일 %s%.0f%%·52주 신고가)에 든 종목이 없습니다."
+                % ("±" if config.EVENT_PLUNGE else "+", config.EVENT_SURGE_PCT),
+                "warning")
+        return _queue_json(
+            request, f"⚡ 급변 종목 {added}개 큐에 추가됨 (우선 처리). {', '.join(tickers[:5])}"
+            + ("…" if len(tickers) > 5 else ""), "success")
+    return RedirectResponse(url=f"/?hot={added}", status_code=303)
+
+
 # ---------------------------------------------------------------------------
 # 단독 실행
 # ---------------------------------------------------------------------------

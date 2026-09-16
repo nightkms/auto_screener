@@ -2,10 +2,12 @@
 S9: 상주 프로세스 entry point.
 
 FastAPI 대시보드 + APScheduler를 한 프로세스에 띄운다.
-매시각 정각에 다음 2단계를 차례로 수행:
+매시각 정각에 다음 3단계를 차례로 수행:
   1) reset_failed_to_pending — 직전 라운드 'failed' 종목을 'pending'으로 되살림
      (attempts 보존 → next_queue_item 정렬에서 자연히 뒤로)
-  2) enqueue_hot_picks(source='auto_hourly') — 핫 종목 5개 큐에 추가
+  2) enqueue_event_picks(source='auto_event') — 최근 분석 종목 중 오늘 급변한
+     종목을 30일 dedup 무시하고 재투입 (priority=1로 아래 핫픽보다 먼저 처리)
+  3) enqueue_hot_picks(source='auto_hourly') — 핫 종목 5개 큐에 추가
 
 큐 워커는 백그라운드에서 1개씩 처리한다. 보고서가 미생성된 'failed' 종목은
 다음 정각까지 휴면 → 같은 종목을 즉시 재시도하지 않음.
@@ -32,6 +34,7 @@ from apscheduler.triggers.date import DateTrigger
 import agents
 import config
 import dashboard
+import event_watch
 import notifier
 import pipeline
 import storage
@@ -176,7 +179,7 @@ async def _check_credentials_and_alert():
 
 
 async def _scheduled_run():
-    """매시각 정각: 인증 점검 → failed 큐 복귀 → 핫 종목 enqueue."""
+    """매시각 정각: 인증 점검 → failed 큐 복귀 → 이벤트 재분석 → 핫 종목 enqueue."""
     await _check_credentials_and_alert()       # 토큰 갱신·만료 알림 (paused와 무관)
     # 일시정지 중이면 큐를 건드리지 않는다 (복귀·신규 enqueue 모두 스킵 →
     # 재개 시 큐가 폭증하지 않게). 재시작해도 paused는 영속 유지된다.
@@ -190,6 +193,14 @@ async def _scheduled_run():
             log.info("스케줄: failed %d건을 'pending'으로 복귀 (재시도 라운드)", rn)
     except Exception:
         log.exception("스케줄: reset_failed_to_pending 실패")
+    # 이벤트 재분석을 핫픽보다 먼저 — 30일 dedup에 갇힌 종목이라도 오늘 급변했으면
+    # 그날 안에 원인을 규명해야 한다. 큐에서도 priority=1로 앞질러 처리된다.
+    if config.EVENT_WATCH_ENABLED:
+        try:
+            n_ev, _ = await event_watch.enqueue_event_picks()
+            log.info("스케줄: 이벤트 재분석 %d 종목 큐 추가됨", n_ev)
+        except Exception:
+            log.exception("스케줄: enqueue_event_picks 실패")
     try:
         added, _ = await pipeline.enqueue_hot_picks(
             config.TOP_N, source="auto_hourly",

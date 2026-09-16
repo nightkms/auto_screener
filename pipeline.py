@@ -80,7 +80,7 @@ async def run_once(top_n: int = config.TOP_N,
         prior_summaries: dict[str, str] = {}
         for c in cands:
             prior = ""
-            if source in ("auto_weekly", "auto_hourly"):
+            if source in ("auto_weekly", "auto_hourly", "auto_event"):
                 prior = ticker_archive.read_last_summary(c.ticker, c.name)
             prior_summaries[c.ticker] = prior
             try:
@@ -259,9 +259,11 @@ async def run_for_ticker(ticker: str, name: str = "",
         storage.save_candidates(run_id, [cand.to_dict()])
 
         # 원자료는 매번 전체 새로 받음. 이전 회차 한 줄 결론만 컨텍스트로 주입
-        # (auto_weekly 일 때만 — 사용자가 직접 찍은 manual/telegram은 깨끗한 재분석).
+        # (자동 경로일 때만 — 사용자가 직접 찍은 manual/telegram은 깨끗한 재분석).
+        # auto_event(급변 재분석)는 '직전 회차 대비 무엇이 달라졌나'가 분석의 본질이라
+        # 이전 결론 주입이 특히 중요하다.
         prior_summary = ""
-        if source in ("auto_weekly", "auto_hourly"):
+        if source in ("auto_weekly", "auto_hourly", "auto_event"):
             prior_summary = ticker_archive.read_last_summary(ticker, name)
             if prior_summary:
                 log.info("[%s] 이전 회차 결론 컨텍스트 주입 (%d자)",

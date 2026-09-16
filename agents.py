@@ -135,14 +135,30 @@ def _build_user_prompt(name: str, ticker: str, candidate: selector.Candidate,
     lines.append(f"- 현재가(직전 종가): {candidate.close:,}원")
     lines.append("")
 
-    # 오늘 실제로 움직여서 선정된 종목(상한가·거래량급증)은 '당일 트리거' 규명이 핵심.
-    mover = {"upper": "상한가", "quant": "거래량 급증"}.get(candidate.source_tag or "")
-    if mover:
-        lines.append(f"## 🚨 당일 급등 종목 (선정 사유: 오늘 {mover})")
-        lines.append(f"- 이 종목은 **오늘(직전 거래일) {mover}**로 시세 리스트에 포착되어 "
-                     "분석 대상이 됐다.")
-        lines.append(f"- **반드시 '오늘 왜 {mover}가 나왔는지' 당일 트리거를 WebSearch로 "
-                     "규명하라**: 당일 공시·뉴스·테마/정책·수급(외국인·기관·개인) 중 무엇이 "
+    # 오늘 실제로 움직여서 잡힌 종목(상한가·거래량급증·이벤트 재분석)은
+    # '당일 트리거' 규명이 핵심. event:* 는 event_watch가 붙이는 재소환 태그다.
+    tag = candidate.source_tag or ""
+    mover = {"upper": "상한가", "quant": "거래량 급증"}.get(tag)
+    event_reason = tag[len("event:"):] if tag.startswith("event:") else ""
+    if mover or event_reason:
+        lines.append(f"## 🚨 당일 급변 종목 (감지: {mover or event_reason})")
+        if event_reason:
+            # 재소환: 최근 이미 분석한 종목인데 오늘 크게 움직여 다시 불려온 것.
+            lines.append(f"- 이 종목은 최근 이미 분석했지만, 오늘 **{event_reason}** — "
+                         "이 급변이 감지돼 30일 재분석 주기를 앞당겨 다시 불려왔다.")
+            lines.append("- **이번 회차의 1순위 과제는 '오늘 무슨 일이 있었나'다.** "
+                         "위 이전 회차 요약이 있다면, 그때와 비교해 **무엇이 새로 생겼는지**를 "
+                         "찾는 데 집중하라.")
+            lines.append("- 새 재료가 없고 수급·테마성 변동이면 그렇게 단정적으로 적어라 — "
+                         "'펀더멘털 변화 없음, 수급/테마 주도'도 완결된 답이다. "
+                         "억지로 새 스토리를 만들지 말 것.")
+            ask = "오늘 왜 이렇게 움직였는지"
+        else:
+            lines.append(f"- 이 종목은 **오늘(직전 거래일) {mover}**로 시세 리스트에 포착되어 "
+                         "분석 대상이 됐다.")
+            ask = f"오늘 왜 {mover}가 나왔는지"
+        lines.append(f"- **반드시 '{ask}' 당일 트리거를 WebSearch로 규명하라**: "
+                     "당일 공시·뉴스·테마/정책·수급(외국인·기관·개인) 중 무엇이 "
                      "방아쇠였는지 구체적 사실로 짚을 것.")
         lines.append("- 트리거를 못 찾으면 '당일 트리거 미확인'이라고 명시하고 추정 수위를 "
                      "낮춰라 (지어내기 금지).")

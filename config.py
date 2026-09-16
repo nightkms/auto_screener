@@ -46,6 +46,27 @@ CLAUDE_SUB_MODEL = _opt("CLAUDE_SUB_MODEL", "claude-sonnet-4-6")
 CLAUDE_SYNTH_MODEL = _opt("CLAUDE_SYNTH_MODEL", "claude-opus-4-7")
 LOG_LEVEL = _opt("LOG_LEVEL", "INFO")
 
+# ── 이벤트 재분석 감시 (event_watch) ────────────────────────────────────────
+# selector는 최근 30일 내 분석한 종목을 dedup으로 뺀다. 그 사이에 주가가 급변하면
+# "오늘 왜 튀었는지"를 그날 바로 봐야 하므로, 최근 분석 종목만 되짚어 이벤트가
+# 잡히면 dedup을 무시하고 큐에 다시 넣는다.
+# 쿨다운·일일 상한은 두지 않는다(사용자 룰). 같은 날 같은 종류만 1회로 묶이고
+# (event_trigger UNIQUE) 날짜가 바뀌면 다시 트리거된다 → 이틀 연속 상한가면 이틀 다.
+#
+# 트리거는 **당일성 지표만** 쓴다 — 알고 싶은 건 "오늘 이 종목에 무슨 일이
+# 있었나"이기 때문. 아래 두 후보는 실측 후 제외했다(2026-08-06, 398종목 20거래일):
+#   - 거래량 급증 배수: 사용자 룰로 미사용 (가격만 본다)
+#   - 분석일 종가 대비 누적 이탈: 30일에 걸친 완만한 하락도 잡혀 당일성이 없음
+#   - 52주 신저가: 하락장에 하루 40~86건씩 쏟아짐 → 개별 특이사항이 아님
+EVENT_WATCH_ENABLED = _opt("EVENT_WATCH_ENABLED", "1").lower() not in ("0", "off", "false")
+EVENT_WATCH_DAYS = int(_opt("EVENT_WATCH_DAYS", "30"))      # 감시 대상 = 최근 N일 내 분석 종목
+EVENT_SURGE_PCT = float(_opt("EVENT_SURGE_PCT", "15"))      # 당일 등락률 ±N% (중앙값 23종목/일)
+# 급락(-EVENT_SURGE_PCT% 이하)을 트리거로 쓸지. 기본 off — 급락은 "왜 튀었나"를
+# 그날 확인할 가치가 급등보다 낮은데 토큰은 똑같이 먹는다(사용자 룰, 2026-09-06).
+EVENT_PLUNGE = _opt("EVENT_PLUNGE", "0").lower() not in ("0", "off", "false")
+# 52주 신고가 경신(하루 0~7건). 끄려면 .env에 EVENT_HIGH52=0
+EVENT_HIGH52 = _opt("EVENT_HIGH52", "1").lower() not in ("0", "off", "false")
+
 # 모든 산출 데이터는 이 패키지 폴더(ROOT) 밑에 둔다 — 폴더째 옮겨도 데이터가 따라옴.
 DATA_DIR = ROOT / "data"
 DB_PATH = DATA_DIR / "screener.db"

@@ -93,9 +93,10 @@ CREATE TABLE IF NOT EXISTS analysis_queue (
     ticker       TEXT NOT NULL,
     name         TEXT,
     market       TEXT,
-    source       TEXT NOT NULL DEFAULT 'manual',   -- manual/auto_weekly/telegram (알림정책용)
-    pick_source  TEXT,                             -- selector 선정근거: search/upper/quant/z-score/manual
+    source       TEXT NOT NULL DEFAULT 'manual',   -- manual/auto_weekly/auto_hourly/auto_event/telegram (알림정책용)
+    pick_source  TEXT,                             -- selector 선정근거: search/upper/quant/z-score/manual/event:<사유>
     status       TEXT NOT NULL DEFAULT 'pending',  -- pending/processing/done/failed
+    priority     INTEGER NOT NULL DEFAULT 0,       -- 클수록 먼저. 이벤트 재분석(당일성)만 1
     queued_at    TEXT NOT NULL,
     started_at   TEXT,
     ended_at     TEXT,
@@ -149,6 +150,20 @@ CREATE TABLE IF NOT EXISTS app_state (
     key   TEXT PRIMARY KEY,
     value TEXT
 );
+
+CREATE TABLE IF NOT EXISTS event_trigger (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    ticker       TEXT NOT NULL,
+    name         TEXT,
+    event_date   TEXT NOT NULL,        -- 거래일 YYYY-MM-DD (일봉 마지막 봉 기준)
+    kind         TEXT NOT NULL,        -- surge/plunge/volume/drift_up/drift_down/high52/low52
+    detail       TEXT,                 -- 사람이 읽는 사유 ('당일 +12.4%')
+    metric       REAL,                 -- 판정에 쓴 수치 (등락률·배수 등)
+    queued       INTEGER NOT NULL DEFAULT 0,   -- 큐 투입 성공 여부
+    created_at   TEXT NOT NULL,
+    UNIQUE(ticker, event_date, kind)   -- 같은 날 같은 종류는 1회만 (쿨다운 아님)
+);
+CREATE INDEX IF NOT EXISTS idx_event_trigger_date ON event_trigger(event_date DESC);
 """
 
 # 실패 분류는 사용하지 않는다 (모든 실패는 무한 retry, 정렬로만 우선순위 결정).
@@ -175,6 +190,10 @@ def _migrate(c: sqlite3.Connection) -> None:
     if "pick_source" not in cols("analysis_queue"):
         c.execute("ALTER TABLE analysis_queue ADD COLUMN pick_source TEXT")
         log.info("migrate: analysis_queue.pick_source 추가")
+    if "priority" not in cols("analysis_queue"):
+        c.execute("ALTER TABLE analysis_queue ADD COLUMN priority "
+                  "INTEGER NOT NULL DEFAULT 0")
+        log.info("migrate: analysis_queue.priority 추가")
     if "pick_source" not in cols("reports"):
         c.execute("ALTER TABLE reports ADD COLUMN pick_source TEXT")
         log.info("migrate: reports.pick_source 추가")
@@ -352,11 +371,15 @@ def candidates_for_run(run_id: int) -> list[dict]:
 # Analysis queue
 # ---------------------------------------------------------------------------
 def add_to_queue(ticker: str, name: str = "", market: str = "",
-                 source: str = "manual", pick_source: str = "") -> bool:
+                 source: str = "manual", pick_source: str = "",
+                 priority: int = 0) -> bool:
     """pending/processing/failed 인 같은 ticker가 이미 있으면 추가하지 않음.
     'failed'까지 막아야 정각 hot pick이 동일 retry 종목을 중복 INSERT하지 않음.
-    source: 'manual' (사용자 수동 추가) / 'auto_weekly' / 'auto_hourly' / 'telegram'.
-    pick_source: selector 선정근거 (search/upper/quant/z-score/manual). 화면 표시용."""
+    source: 'manual' (사용자 수동 추가) / 'auto_weekly' / 'auto_hourly' /
+            'auto_event' (급변 이벤트 재분석) / 'telegram'.
+    pick_source: selector 선정근거 (search/upper/quant/z-score/manual/event:<사유>). 화면 표시용.
+    priority: 클수록 먼저 처리. 이벤트 재분석만 1 — '오늘 왜 튀었나'는 그날 안에
+    답이 나와야 의미가 있어 뒤에 쌓인 정기 핫픽보다 앞질러 처리한다."""
     with _connect() as c:
         exists = c.execute(
             "SELECT 1 FROM analysis_queue WHERE ticker=? "
@@ -367,9 +390,9 @@ def add_to_queue(ticker: str, name: str = "", market: str = "",
             return False
         c.execute(
             """INSERT INTO analysis_queue
-                   (ticker, name, market, source, pick_source, queued_at)
-               VALUES (?, ?, ?, ?, ?, ?)""",
-            (ticker, name, market, source, pick_source or None,
+                   (ticker, name, market, source, pick_source, priority, queued_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            (ticker, name, market, source, pick_source or None, priority,
              datetime.now().isoformat(timespec="seconds")),
         )
         return True
@@ -383,13 +406,15 @@ def queue_items(statuses: tuple[str, ...] | None = None,
         placeholders = ",".join("?" for _ in statuses)
         sql += f" WHERE status IN ({placeholders})"
         params = statuses
-    # 표시 순서 = 실제 처리 순서: 처리중(현재 분석) → 대기(다음 처리, FIFO=id ASC) → 실패(휴면).
-    # next_queue_item()이 pending을 id ASC로 잡으므로 목록도 같은 순서로 보여야 직관적.
+    # 표시 순서 = 실제 처리 순서: 처리중(현재 분석) → 대기 → 실패(휴면).
+    # 대기 안에서는 next_queue_item()과 같은 정렬(우선순위 DESC → FIFO)이라야
+    # 목록이 실제 처리 순서와 일치해 직관적이다.
     sql += """ ORDER BY CASE status
                           WHEN 'processing' THEN 0
                           WHEN 'pending'    THEN 1
                           ELSE 2
                         END,
+                        priority DESC,
                         id ASC
                LIMIT ?"""
     params = params + (limit,)
@@ -400,12 +425,13 @@ def queue_items(statuses: tuple[str, ...] | None = None,
 def next_queue_item() -> dict | None:
     """다음 처리할 항목. 'pending'만 잡음. 'failed'는 다음 정각의
     reset_failed_to_pending까지 휴면 → 즉시 재시도 방지.
-    정렬: id ASC 순수 FIFO → 재시도 구분 없이 먼저 등록된 종목부터 처리."""
+    정렬: priority DESC → id ASC. 같은 우선순위 안에서는 재시도 구분 없이 먼저
+    등록된 종목부터(FIFO). 이벤트 재분석(priority=1)만 정기 큐를 앞지른다."""
     with _connect() as c:
         row = c.execute(
             """SELECT * FROM analysis_queue
                WHERE status='pending'
-               ORDER BY id ASC LIMIT 1"""
+               ORDER BY priority DESC, id ASC LIMIT 1"""
         ).fetchone()
         return dict(row) if row else None
 
@@ -637,6 +663,72 @@ def recently_analyzed_tickers(days: int = 30) -> set[str]:
             (threshold,),
         ).fetchall()
     return {r["ticker"] for r in rows}
+
+
+def recently_analyzed_meta(days: int = 30) -> list[dict]:
+    """최근 N일 내 분석된 종목 + **가장 최근** 분석 시각·등급. event_watch 감시 대상.
+
+    recently_analyzed_tickers와 같은 모집단이지만 분석일이 필요하다 —
+    '분석일 종가 대비 얼마나 이탈했나'(drift)의 기준일이 되기 때문.
+    등급 필터는 걸지 않는다: INTEREST로 흘려보낸 종목이 갑자기 상한가를 가는 경우가
+    오히려 봐야 할 케이스다.
+
+    MAX(started_at)와 같은 행의 ticker/name/grade가 딸려오는 건 SQLite의 bare
+    column 규칙(3.7.11+)에 의해 보장된다."""
+    threshold = (datetime.now() - timedelta(days=days)).isoformat(timespec="seconds")
+    with _connect() as c:
+        rows = c.execute(
+            """SELECT r.ticker,
+                      r.name,
+                      r.grade                AS last_grade,
+                      MAX(runs.started_at)   AS analyzed_at
+               FROM reports r
+               JOIN runs ON r.run_id = runs.id
+               WHERE runs.started_at >= ?
+               GROUP BY r.ticker
+               ORDER BY analyzed_at DESC""",
+            (threshold,),
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+# ---------------------------------------------------------------------------
+# 이벤트 트리거 (event_watch)
+# ---------------------------------------------------------------------------
+def record_event_trigger(ticker: str, name: str, event_date: str, kind: str,
+                         detail: str = "", metric: float | None = None) -> bool:
+    """이벤트 1건 기록. 이미 같은 (종목, 날짜, 종류)가 있으면 False.
+
+    쿨다운이 아니라 **중복 제거**다 — 매시각 감시가 같은 날 같은 이벤트를 반복
+    검출하는 걸 막을 뿐, 날짜가 바뀌면 같은 종류라도 다시 True가 된다."""
+    with _connect() as c:
+        cur = c.execute(
+            """INSERT OR IGNORE INTO event_trigger
+                   (ticker, name, event_date, kind, detail, metric, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            (ticker, name, event_date, kind, detail or None, metric,
+             datetime.now().isoformat(timespec="seconds")),
+        )
+        return cur.rowcount > 0
+
+
+def mark_event_queued(ticker: str, event_date: str) -> None:
+    """해당 종목·날짜의 이벤트들을 '큐 투입됨'으로 표시 (대시보드 표시용)."""
+    with _connect() as c:
+        c.execute(
+            "UPDATE event_trigger SET queued=1 WHERE ticker=? AND event_date=?",
+            (ticker, event_date),
+        )
+
+
+def recent_event_triggers(limit: int = 50) -> list[dict]:
+    with _connect() as c:
+        rows = c.execute(
+            """SELECT * FROM event_trigger
+               ORDER BY event_date DESC, id DESC LIMIT ?""",
+            (limit,),
+        ).fetchall()
+    return [dict(r) for r in rows]
 
 
 def period_stats(days: int = 30) -> dict:

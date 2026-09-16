@@ -110,10 +110,20 @@ def _build_synth_prompt(candidate: selector.Candidate,
     lines.append(f"- 주간 등락률: {candidate.weekly_return:+.2f}% / 거래대금 급증: {candidate.value_surge:.2f}배")
     lines.append(f"- 외인 보유율 변화: {candidate.foreign_delta:+.3f}%p")
     lines.append(f"- 분석일: {date.today().isoformat()}")
-    mover = {"upper": "상한가", "quant": "거래량 급증"}.get(candidate.source_tag or "")
+    tag = candidate.source_tag or ""
+    mover = {"upper": "상한가", "quant": "거래량 급증"}.get(tag)
+    event_reason = tag[len("event:"):] if tag.startswith("event:") else ""
     if mover:
         lines.append(f"- **선정 사유: 오늘 {mover}** → 카탈리스트 보고의 '당일 급등 "
                      f"트리거'를 보고서에 `## 📈 오늘 {mover} 사유` 섹션으로 명시할 것.")
+    elif event_reason:
+        # event_watch가 30일 dedup을 뚫고 재소환한 종목 — 당일 원인 규명이 본론이다.
+        lines.append(f"- **선정 사유: 이벤트 재분석 ({event_reason})** → 최근 이미 분석한 "
+                     "종목이 오늘 크게 움직여 다시 불려왔다. 카탈리스트 보고의 '당일 급변 "
+                     "트리거'를 `## 📈 오늘 급변 사유` 섹션으로 **반드시** 쓰고(제목의 "
+                     "'급변'은 실제 방향에 맞춰 급등/급락으로 바꿔도 된다), "
+                     "`## 이전 회차 대비 변동`에서 직전 결론과 무엇이 달라졌는지(달라진 게 "
+                     "없으면 없다고) 분명히 밝힐 것.")
     lines.append("")
     if prior_summary:
         lines.append("## 📌 이전 회차 종합 요약 (변동 비교용)")

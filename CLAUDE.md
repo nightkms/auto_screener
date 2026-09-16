@@ -46,8 +46,10 @@ python scheduler.py           # 상주: 대시보드(127.0.0.1:8765) + 매시각
 
 ```
 [매시각 정각 트리거] (scheduler.py)
-   reset_failed_to_pending → enqueue_hot_picks(auto_hourly)
-        │
+   reset_failed_to_pending → enqueue_event_picks(auto_event) → enqueue_hot_picks(auto_hourly)
+        │                            │
+        │                            └─ event_watch.py  최근 30일 분석 종목 중 오늘 급변한
+        │                               종목을 dedup 무시하고 재투입 (priority=1로 먼저 처리)
         ▼
 selector.py     검색상위 → 상한가·거래량 급증 → 부족분 시총 z-score → top 5  (0건 허용)
         │
@@ -63,6 +65,7 @@ synthesizer.py  Claude Opus: 5개 보고 종합 + 등급(STRONG/WATCH/INTEREST/S
         ├──► storage.py     SQLite + analysis/auto/<주차>/*.md
         └──► notifier.py    텔레그램 2단계 푸시(요약 → 상세)
                             (auto_hourly = STRONG 또는 1~2년 실적변화 이벤트, SKIP 제외)
+                            (auto_event  = 등급 무관 전송 — 급변 원인 자체가 알림 가치)
 ```
 
 큐 워커·가격 알림 워커는 `dashboard.py`에 있고 `scheduler.lifespan`이 백그라운드 태스크로 띄운다.
@@ -75,6 +78,7 @@ synthesizer.py  Claude Opus: 5개 보고 종합 + 등급(STRONG/WATCH/INTEREST/S
 | `dashboard.py` | FastAPI 라우트, 큐 워커, 가격감시 워커, 보고서 Q&A 엔드포인트 |
 | `config.py` | `.env` 로더·검증. 모든 설정·경로의 단일 출처 |
 | `selector.py` | hot pick 선정 (3단계, [정책](docs/design/selector.md)) |
+| `event_watch.py` | 이벤트 재분석 트리거. 최근 분석 종목 중 오늘 급변한 종목을 30일 dedup 무시하고 재투입 |
 | `data_loader.py` | DART/네이버 수집, 분석 컨텍스트 패킹 |
 | `agents.py` | 5개 서브에이전트 병렬 실행 (`MAX_TURNS_PER_AGENT`, sub별 timeout) |
 | `synthesizer.py` | 종합·등급 판정 (fallback rule 포함) |
@@ -91,6 +95,8 @@ python scheduler.py             # 상주(대시보드+스케줄러)
 python pipeline.py              # 1회 즉시 (top 5)
 python pipeline.py --dry-run    # 알림 끄고 테스트
 python selector.py              # 핫 종목 top 5만 출력
+python event_watch.py           # 오늘 급변한 '이미 분석한 종목' 감지만 (큐 미투입)
+python event_watch.py --enqueue # 위 + 큐 투입
 python data_loader.py 005930    # 특정 종목 DART 컨텍스트
 python agents.py 260970         # 5 서브에이전트만
 python synthesizer.py 260970    # 위 + 종합 등급
@@ -117,6 +123,20 @@ Windows 상주 백그라운드 기동은 `start_screener.bat`(→ `start_helper.
 ### selector
 - 검색상위 우선 → 상한가·거래량 급증 보강 → 부족분만 시총 z-score(="일반") 보강, dedup 유지,
   **0건은 정상**. 윈도우(30일)를 임의로 줄이지 말 것 → [selector](docs/design/selector.md).
+
+### event_watch (이벤트 재분석)
+- selector와 **반대 방향**이다: selector는 안 본 종목을 찾고(dedup 적용), event_watch는
+  이미 본 종목 중 오늘 급변한 것을 찾는다(dedup 무시).
+- 트리거는 **당일성 지표만** — 당일 등락률 +15%(급등), 52주 신고가. 거래량 배수는 쓰지 않는다.
+  급락은 기본 off(`EVENT_PLUNGE=0`) — 토큰은 급등과 같이 쓰는데 그날 되짚을 실익이 적다(2026-09-06).
+  '분석일 대비 누적 이탈'·'52주 신저가'는 실측 후 제외(전자는 당일성 없음, 후자는 하락장에
+  하루 40~86건 동반 발생). 임계는 `config.EVENT_*`로만 조정하고 코드에 하드코딩 금지.
+- **쿨다운·하루 상한 없음**(사용자 룰). 중복 제거는 두 가지뿐:
+  ① `event_trigger` UNIQUE(ticker, event_date, kind) — 같은 날 같은 종류 1회
+  ② 오늘 이미 분석된 종목은 오늘 이벤트로 재소환하지 않음 — 없으면 selector가 상한가로
+     뽑아 분석한 종목을 event_watch가 즉시 되잡는 자기참조 루프가 생긴다.
+  둘 다 날짜가 바뀌면 풀린다 → **이틀 연속 급등이면 이틀 다 분석한다.**
+- 큐 `priority=1`로 정기 핫픽을 앞지른다. "오늘 왜 튀었나"는 그날 답이 나와야 의미가 있다.
 
 ### 공시 수집
 - 제목만으론 호재/악재가 안 드러나는 공시(지분·주요사항 등)는 본문 원문을 받아 요약해

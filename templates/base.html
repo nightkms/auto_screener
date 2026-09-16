@@ -240,6 +240,12 @@
       font-weight: 600; font-size: var(--fs-meta); white-space: nowrap;
     }
     .btn-hot:hover { background: #f0f2f5; }
+    /* 급변 감지 = 보조 액션. 어두운 nav 위에서 주 액션(흰 btn-hot)과 구분되게 고스트로. */
+    .btn-event {
+      background: transparent; color: #fff; border: 1px solid #3a3f48;
+      font-weight: 600; font-size: var(--fs-meta); white-space: nowrap;
+    }
+    .btn-event:hover { background: #1f242b; color: #fff; }
 
     /* ---- 큐 상태 / 선정근거 배지 ---- */
     .queue-status { font-size: var(--fs-cap); padding: 1px 7px;
@@ -315,6 +321,10 @@
     <div id="search-results"></div>
   </div>
   <div class="spacer"></div>
+  <form action="/trigger/event" method="post" data-ajax data-busy="급변 종목 감지 중…">
+    <button type="submit" class="btn btn-sm btn-event"
+            title="최근 분석한 종목 중 오늘 급변한 종목을 30일 재분석 주기와 무관하게 큐에 넣습니다">⚡ 급변 종목 감지</button>
+  </form>
   <form action="/trigger" method="post" data-ajax data-busy="큐 추가 중…">
     <button type="submit" class="btn btn-sm btn-hot">▶ 핫 종목 5개 큐 추가</button>
   </form>

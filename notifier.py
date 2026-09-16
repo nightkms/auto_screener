@@ -397,6 +397,9 @@ def build_single_messages(report_id: int,
     - 'auto_weekly' / 'auto_hourly': grade=='STRONG' **또는** 향후 1~2년 실적변화
       이벤트(earnings_event)가 잡힌 종목이면 전송.
       단 **SKIP 등급은 이벤트가 있어도 제외** (볼 가치 낮음).
+    - 'auto_event' (급변 재분석): 등급 무관 전송. 애초에 "오늘 왜 튀었는지"를
+      알려고 부른 종목이라 등급이 낮아도 그 답 자체가 알림 가치다. SKIP도 보낸다 —
+      급변한 종목이 SKIP이면 '올랐지만 살 이유는 없다'가 곧 알고 싶던 결론이다.
     """
     with storage._connect() as c:
         row = c.execute("SELECT * FROM reports WHERE id=?",
@@ -425,7 +428,12 @@ def build_single_messages(report_id: int,
         "telegram": "📱 텔레그램",
         "auto_weekly": "🔁 주간자동",
         "auto_hourly": "⏱️ 시간자동",
+        "auto_event": "⚡ 급변감지",
     }.get(source, source)
+    # 급변 재분석은 '무엇 때문에 불려왔는지'가 제목 다음으로 중요하다.
+    # pick_source에 event_watch가 남긴 사유가 들어 있다 (예: 'event:당일 +18.2%').
+    pick = (r.get("pick_source") or "")
+    trigger_note = _clean(pick[len("event:"):], 90) if pick.startswith("event:") else ""
     title = f"{emoji} {r['name']} ({r['ticker']})"
     md_path = config.resolve_report_md(r["md_path"]) if r.get("md_path") else None
     md = md_path.read_text(encoding="utf-8") if md_path and md_path.exists() else ""
@@ -434,6 +442,8 @@ def build_single_messages(report_id: int,
     report_url = config.dashboard_url(f"/report/{report_id}")
     head = [f"{title} — {src_tag}",
             f"등급 {r['grade']} · 평균 ★ {r['avg_rating']}"]
+    if trigger_note:
+        head.append(f"⚡ 감지: {trigger_note}")
     if event_note:
         head.append(f"🏭 실적변화 이벤트(1~2년): {event_note}")
     head.append(f"전문: {report_url}")
