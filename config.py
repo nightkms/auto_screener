@@ -67,6 +67,21 @@ EVENT_PLUNGE = _opt("EVENT_PLUNGE", "0").lower() not in ("0", "off", "false")
 # 52주 신고가 경신(하루 0~7건). 끄려면 .env에 EVENT_HIGH52=0
 EVENT_HIGH52 = _opt("EVENT_HIGH52", "1").lower() not in ("0", "off", "false")
 
+# ── 연속 실패 알림 (queue_worker) ──────────────────────────────────────────
+# Claude Code는 토큰 만료와 별개로 주기적(체감 ~1주)으로 대화형 재로그인을 요구한다.
+# 이때 credentials.json의 만료 시각은 멀쩡해 보이므로 scheduler의 만료 점검
+# (_check_credentials_and_alert)에 걸리지 않고, 서브에이전트만 전부
+# 'error result: success'로 즉시 실패한다 → 사람이 /login 할 때까지 무한 재시도.
+# 그래서 원인과 무관하게 '분석이 계속 실패하는 상태' 자체를 알림 조건으로 둔다.
+# 일시적 rate-limit/네트워크 실패로 스팸이 되지 않도록 건수와 지속시간을 모두 만족해야 한다
+# (큐에 여러 종목이 쌓여 있으면 건수는 몇 분 만에 채워지므로 시간 조건이 필요).
+FAIL_ALERT_COUNT = int(_opt("FAIL_ALERT_COUNT", "3"))       # 연속 실패 N건 이상
+FAIL_ALERT_HOURS = float(_opt("FAIL_ALERT_HOURS", "3"))     # 그리고 최초 실패 후 N시간 이상 지속
+FAIL_ALERT_REPEAT_H = float(_opt("FAIL_ALERT_REPEAT_H", "6"))  # 지속 중 재알림 간격
+# 실패가 이 시간 넘게 안 찍히면(큐가 비었거나 프로세스가 내려갔던 것) 스트릭을
+# 새로 시작한다 — 안 그러면 며칠 전 실패 1건이 first_ts로 남아 "168시간째 실패"가 된다.
+FAIL_ALERT_STALE_H = float(_opt("FAIL_ALERT_STALE_H", "6"))
+
 # 모든 산출 데이터는 이 패키지 폴더(ROOT) 밑에 둔다 — 폴더째 옮겨도 데이터가 따라옴.
 DATA_DIR = ROOT / "data"
 DB_PATH = DATA_DIR / "screener.db"

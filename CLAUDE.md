@@ -83,7 +83,7 @@ synthesizer.py  Claude Opus: 5개 보고 종합 + 등급(STRONG/WATCH/INTEREST/S
 | `agents.py` | 5개 서브에이전트 병렬 실행 (`MAX_TURNS_PER_AGENT`, sub별 timeout) |
 | `synthesizer.py` | 종합·등급 판정 (fallback rule 포함) |
 | `pipeline.py` | 전체 오케스트레이션 (`run_once`, `enqueue_hot_picks`) |
-| `notifier.py` | 텔레그램 전송 (소스별 알림 정책) |
+| `notifier.py` | 텔레그램 전송 (소스별 알림 정책, 연속 실패/복구 알림) |
 | `report_chat.py` | 대시보드 보고서 Q&A (Sonnet + WebSearch/WebFetch) |
 | `ticker_archive.py` | 종목별 직전 요약(prior_summary) 누적 |
 | `storage.py` | SQLite 스키마·쿼리·복구 함수 |
@@ -106,6 +106,13 @@ python report_chat.py <id> "질문"  # 보고서 Q&A 단독 테스트
 
 Windows 상주 백그라운드 기동은 `start_screener.bat`(→ `start_helper.vbs` + `_get_pid.ps1`),
 종료는 `stop_screener.bat`. macOS/Linux에선 `python scheduler.py`를 직접 띄운다.
+
+keepalive로 **못 막는** 만료도 있다: Claude Code는 토큰 유효기간과 별개로 주기적(체감 ~1주)으로
+대화형 재로그인을 요구한다. 이때 `credentials.json`의 만료 시각은 멀쩡해서 scheduler의 만료
+점검(`_check_credentials_and_alert`)에 안 걸리고, 서브에이전트만 `error result: success`로 전부
+즉시 실패한다 → 사람이 `claude`에서 `/login` 할 때까지 자동 복구 불가(2026-08-22 사고).
+그래서 `dashboard.queue_worker`가 원인과 무관하게 **연속 실패 스트릭**을 세고
+(`FAIL_ALERT_COUNT`건 AND `FAIL_ALERT_HOURS`시간 지속) 텔레그램으로 알린다 — 사람을 부르는 알림이다.
 
 ## 개발 규칙
 

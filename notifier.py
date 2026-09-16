@@ -565,6 +565,55 @@ async def notify_auth_expired(detail: str = "") -> bool:
         return await _send(session, "\n".join(lines), parse_mode=None)
 
 
+# 서브에이전트가 인증 문제로 죽을 때 SDK가 올리는 문구들. Claude Code는 토큰
+# 만료와 별개로 주기적으로 대화형 재로그인을 요구하는데, 그때도 아래처럼 위장된
+# 성공 결과로 떨어진다 → 사람이 `claude` 로 /login 하기 전엔 자동 복구가 안 된다.
+_AUTH_HINTS = ("error result: success", "401", "unauthorized", "authentication",
+               "oauth", "invalid_token", "please run /login", "not logged in")
+
+
+def looks_like_auth_failure(error: str) -> bool:
+    e = (error or "").lower()
+    return any(h in e for h in _AUTH_HINTS)
+
+
+async def notify_analysis_stalled(count: int, hours: float,
+                                   tickers: list[str],
+                                   last_error: str = "") -> bool:
+    """분석이 연속으로 실패하는 상태 알림 (원인 무관).
+
+    scheduler의 만료 점검은 credentials.json의 만료 시각만 보므로, 시각은 멀쩡한데
+    CLI가 재로그인을 요구하는 경우를 못 잡는다. 이 알림은 '결과가 계속 실패한다'는
+    사실 자체를 조건으로 하므로 원인과 무관하게 걸린다."""
+    lines = [
+        "🔴 AutoScreener 분석 연속 실패",
+        f"{count}건 연속 실패, 최초 실패 후 {hours:.1f}시간째 복구되지 않았습니다.",
+    ]
+    if tickers:
+        lines.append(f"실패 종목: {', '.join(tickers[-5:])}")
+    if looks_like_auth_failure(last_error):
+        lines.append("")
+        lines.append("👉 Claude 재로그인이 필요해 보입니다. 원격 접속 후 `claude` 에서 "
+                     "`/login` 하면 다음 큐 처리부터 자동 복구됩니다.")
+    if last_error:
+        lines.append("")
+        lines.append(f"마지막 에러: {last_error[:300]}")
+    lines.append("")
+    lines.append(f"대시보드: {config.dashboard_url()}")
+    async with aiohttp.ClientSession() as session:
+        return await _send(session, "\n".join(lines), parse_mode=None)
+
+
+async def notify_analysis_recovered(fail_count: int, ticker: str = "") -> bool:
+    """연속 실패 알림을 보낸 뒤 분석이 다시 성공했을 때 1회 알림."""
+    lines = ["🟢 AutoScreener 분석 복구",
+             f"{fail_count}건 연속 실패 후 분석이 다시 성공했습니다."]
+    if ticker:
+        lines.append(f"복구 확인 종목: {ticker}")
+    async with aiohttp.ClientSession() as session:
+        return await _send(session, "\n".join(lines), parse_mode=None)
+
+
 async def notify_price_alert(ticker: str, name: str, base_price: float,
                               current_price: float, change_pct: float,
                               base_grade: str | None = None,

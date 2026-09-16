@@ -535,6 +535,61 @@ def set_state(key: str, value: str) -> None:
         )
 
 
+# ── 연속 실패 스트릭 (알림용) ──────────────────────────────────────────────
+# queue_worker가 종목 하나를 끝낼 때마다 성공이면 clear, 실패면 bump 한다.
+# 임계 판정·알림은 dashboard.queue_worker가 하고 여기선 상태만 보관한다(재시작 내성).
+_FAIL_STREAK_KEY = "fail_streak"
+
+
+def get_fail_streak() -> dict:
+    """{count, first_ts, last_ts, tickers[], last_error, alerted_at}. 없으면 count=0."""
+    raw = get_state(_FAIL_STREAK_KEY) or ""
+    if raw:
+        try:
+            d = json.loads(raw)
+            if isinstance(d, dict):
+                return d
+        except Exception:
+            pass
+    return {"count": 0, "first_ts": 0.0, "last_ts": 0.0,
+            "tickers": [], "last_error": "", "alerted_at": 0.0}
+
+
+def bump_fail_streak(ticker: str, name: str, error: str, now_ts: float,
+                     stale_after_s: float = 0) -> dict:
+    """연속 실패 1건 기록 후 갱신된 상태 반환. 최초 실패 시각(first_ts)은 유지한다.
+    단 직전 실패로부터 stale_after_s를 넘겼으면 연속으로 보지 않고 새로 시작한다."""
+    st = get_fail_streak()
+    last = float(st.get("last_ts") or 0)
+    if stale_after_s and last and now_ts - last > stale_after_s:
+        st = {"count": 0, "first_ts": 0.0, "last_ts": 0.0,
+              "tickers": [], "last_error": "", "alerted_at": 0.0}
+    st["count"] = int(st.get("count") or 0) + 1
+    if not st.get("first_ts"):
+        st["first_ts"] = now_ts
+    st["last_ts"] = now_ts
+    label = f"{name}({ticker})" if name else ticker
+    tickers = [t for t in (st.get("tickers") or []) if t != label]
+    st["tickers"] = (tickers + [label])[-10:]      # 최근 10개만
+    st["last_error"] = (error or "")[:500]
+    set_state(_FAIL_STREAK_KEY, json.dumps(st, ensure_ascii=False))
+    return st
+
+
+def mark_fail_streak_alerted(now_ts: float) -> None:
+    st = get_fail_streak()
+    st["alerted_at"] = now_ts
+    set_state(_FAIL_STREAK_KEY, json.dumps(st, ensure_ascii=False))
+
+
+def clear_fail_streak() -> dict:
+    """성공 1건이면 스트릭 리셋. 리셋 직전 상태를 반환(복구 알림 판단용)."""
+    prev = get_fail_streak()
+    if prev.get("count"):
+        set_state(_FAIL_STREAK_KEY, "")
+    return prev
+
+
 def is_queue_paused() -> bool:
     """큐 분석 일시정지 여부. 영속 → 재시작해도 유지."""
     return get_state("queue_paused", "0") == "1"

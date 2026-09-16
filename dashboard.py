@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from datetime import date, datetime
 from pathlib import Path
 from typing import Any
@@ -513,6 +514,49 @@ async def price_watch_worker():
             await asyncio.sleep(600)
 
 
+# ── 연속 실패 감시 ────────────────────────────────────────────────────────
+# 실패 원인은 묻지 않는다. Claude Code가 주기적으로 요구하는 대화형 재로그인은
+# credentials.json의 만료 시각이 멀쩡한 채로 오기 때문에 scheduler의 만료 점검에
+# 걸리지 않고, 서브에이전트만 조용히 전부 실패한다(2026-08-22). 사람이 /login 하기
+# 전엔 자동 복구가 없으므로 '계속 실패한다'는 결과 자체를 알림 조건으로 삼는다.
+async def _note_queue_success(label: str) -> None:
+    """성공 1건 → 스트릭 리셋. 알림을 보낸 뒤였다면 복구 알림 1회."""
+    import notifier
+    prev = storage.clear_fail_streak()
+    if prev.get("alerted_at"):
+        try:
+            await notifier.notify_analysis_recovered(
+                int(prev.get("count") or 0), label)
+        except Exception:
+            log.warning("복구 알림 전송 실패", exc_info=True)
+
+
+async def _note_queue_failure(ticker: str, name: str, error: str) -> None:
+    """실패 1건 기록 후 임계(건수 AND 지속시간) 충족 시 텔레그램 알림.
+
+    건수만 보면 큐에 쌓인 종목이 몇 분 만에 연달아 죽어 일시적 rate-limit에도
+    알림이 튄다 → 최초 실패로부터의 경과 시간을 함께 요구한다."""
+    import notifier
+    now = time.time()
+    st = storage.bump_fail_streak(
+        ticker, name, error, now,
+        stale_after_s=config.FAIL_ALERT_STALE_H * 3600)
+    count = int(st.get("count") or 0)
+    hours = (now - float(st.get("first_ts") or now)) / 3600
+    if count < config.FAIL_ALERT_COUNT or hours < config.FAIL_ALERT_HOURS:
+        return
+    last_alert = float(st.get("alerted_at") or 0)
+    if last_alert and now - last_alert < config.FAIL_ALERT_REPEAT_H * 3600:
+        return
+    log.warning("연속 실패 %d건 / %.1f시간 → 텔레그램 알림", count, hours)
+    try:
+        await notifier.notify_analysis_stalled(
+            count, hours, st.get("tickers") or [], st.get("last_error") or "")
+        storage.mark_fail_streak_alerted(now)
+    except Exception:
+        log.warning("연속 실패 알림 전송 실패", exc_info=True)
+
+
 async def queue_worker():
     """큐를 처리하는 백그라운드 워커. lifespan에서 띄움.
     분석 락이 잡혀있으면 대기, 풀리면 큐에서 다음 항목 꺼내 실행.
@@ -551,14 +595,17 @@ async def queue_worker():
                 )
                 storage.mark_queue_done(qid, run_id=run_id)
                 log.info("queue: 완료 qid=%d run_id=%d", qid, run_id)
+                await _note_queue_success(f"{name}({ticker})" if name else ticker)
             except pipeline.RetryableAnalysisError as e:
                 log.warning("queue: 실패 qid=%d: %s", qid, e)
                 storage.mark_queue_failed_retry(qid, str(e))
+                await _note_queue_failure(ticker, name, str(e))
                 await asyncio.sleep(30)
             except Exception as e:
                 err_str = f"{type(e).__name__}: {e}"
                 log.exception("queue: 실패 qid=%d: %s", qid, e)
                 storage.mark_queue_failed_retry(qid, err_str)
+                await _note_queue_failure(ticker, name, err_str)
                 await asyncio.sleep(30)
         except asyncio.CancelledError:
             log.info("queue_worker 취소됨")
