@@ -476,6 +476,19 @@ def processing_count() -> int:
         ).fetchone()[0]
 
 
+def queue_counts() -> dict[str, int]:
+    """상태별 큐 항목 수 {'pending': n, 'processing': n, 'failed': n}.
+    없는 상태도 0으로 채워 돌려준다. 텔레그램 알림 꼬리의 '남은 큐' 표시용."""
+    counts = {"pending": 0, "processing": 0, "failed": 0}
+    with _connect() as c:
+        for status, n in c.execute(
+            "SELECT status, COUNT(*) FROM analysis_queue "
+            "WHERE status IN ('pending','processing','failed') GROUP BY status"
+        ).fetchall():
+            counts[status] = n
+    return counts
+
+
 # ---------------------------------------------------------------------------
 # 앱 상태 (key-value). 큐 일시정지 같은 영속 플래그 보관.
 # ---------------------------------------------------------------------------

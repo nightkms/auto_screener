@@ -6,6 +6,8 @@ S5: 텔레그램 알림.
    + 한 줄 요약 + 영역별 매트릭스(점수와 함께 요지·평균까지)
 2. 상세(`summarize_detail`) — 위에 담기지 않은 **나머지 섹션 전부**를 요약 없이 그대로
 
+마지막 메시지 끝에는 전송 시점의 남은 큐 개수(대기·실패·일시정지)를 한 줄 붙인다.
+
 밖에서 대시보드 링크를 못 여는 상황을 전제하므로, 2건을 합치면 보고서 내용이 빠짐없이
 전달된다. 1건만 읽고 넘길지는 사용자가 고른다.
 
@@ -456,15 +458,40 @@ def build_single_messages(report_id: int,
     return [brief, detail]
 
 
+def _queue_footer() -> str:
+    """알림 맨 끝에 붙는 '남은 큐' 한 줄. 전송 시점에 DB를 읽는다.
+
+    알림은 워커가 해당 종목을 mark_queue_done 하기 **전**에 나가므로, 방금 끝난 종목은
+    아직 'processing'이다 → 남은 수는 'pending'만 센다. 'failed'는 다음 정각
+    reset까지 휴면이라 따로 표기하고, 일시정지 중이면 대기가 줄지 않으니 함께 알린다.
+    조회 실패가 알림 자체를 막으면 안 되므로 예외는 삼키고 빈 문자열."""
+    try:
+        counts = storage.queue_counts()
+        paused = storage.is_queue_paused()
+    except Exception as e:
+        log.warning("큐 개수 조회 실패: %s", e)
+        return ""
+    parts = [f"📋 남은 큐: 대기 {counts['pending']}건"]
+    if counts["failed"]:
+        parts.append(f"실패(정각 재시도) {counts['failed']}건")
+    if paused:
+        parts.append("⏸ 일시정지 중")
+    return " · ".join(parts)
+
+
 async def notify_single_report(report_id: int,
                                 source: str = "manual") -> bool:
     """종목 1개 분석 완료 즉시 알림. 요약 1건 + 상세 1건 연속 전송.
+    마지막 메시지 끝에 남은 큐 개수(`_queue_footer`)를 붙인다.
 
     정책·본문 구성은 `build_single_messages` 참고.
     """
     msgs = build_single_messages(report_id, source)
     if not msgs:
         return False
+    footer = _queue_footer()
+    if footer:
+        msgs[-1] = f"{msgs[-1]}\n\n{footer}"
     async with aiohttp.ClientSession() as session:
         ok = True
         for msg in msgs:
@@ -581,6 +608,8 @@ def _main():
         msgs = build_single_messages(int(sys.argv[2]), src)
         if not msgs:
             print(f"(알림 대상 아님 — source={src} 정책상 제외)")
+        elif footer := _queue_footer():          # 실제 전송과 같은 꼬리
+            msgs[-1] = f"{msgs[-1]}\n\n{footer}"
         for i, msg in enumerate(msgs, 1):
             print(f"\n───── {i}/{len(msgs)}번째 메시지 ({len(msg)}자) ─────")
             print(msg)
