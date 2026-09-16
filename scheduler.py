@@ -22,6 +22,7 @@ import _silence_console  # noqa: F401  # 자식 콘솔 창 숨김 (첫 import)
 
 import asyncio
 import logging
+import os
 import time
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone as _dt_timezone
@@ -260,11 +261,28 @@ async def lifespan(app):
 dashboard.app.router.lifespan_context = lifespan
 
 
+def _write_pid_file():
+    """자기 PID를 data/screener.pid에 남긴다.
+
+    작업 스케줄러(AutoScreener, S4U)로 기동하면 이 프로세스는 **세션 0**에서 돈다.
+    그러면 대화형 세션의 PowerShell은 CommandLine·실행경로조차 못 읽어
+    (Access denied) WMI로 인스턴스를 찾는 방식이 통째로 실패한다.
+    프로세스가 직접 쓴 PID 파일은 권한과 무관하게 읽히므로,
+    _stop_all.ps1/_get_pid.ps1이 이걸 1순위로 쓴다.
+    """
+    try:
+        config.DATA_DIR.mkdir(parents=True, exist_ok=True)
+        (config.DATA_DIR / "screener.pid").write_text(str(os.getpid()), encoding="ascii")
+    except OSError as e:
+        log.warning("PID 파일 기록 실패: %s", e)
+
+
 def main():
     logging.basicConfig(
         level=config.LOG_LEVEL,
         format="%(asctime)s %(name)s %(message)s",
     )
+    _write_pid_file()
     uvicorn.run(
         "scheduler:dashboard.app",
         host="127.0.0.1",

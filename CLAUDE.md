@@ -104,8 +104,25 @@ python notifier.py test         # 텔레그램 봇 핑
 python report_chat.py <id> "질문"  # 보고서 Q&A 단독 테스트
 ```
 
-Windows 상주 백그라운드 기동은 `start_screener.bat`(→ `start_helper.vbs` + `_get_pid.ps1`),
-종료는 `stop_screener.bat`. macOS/Linux에선 `python scheduler.py`를 직접 띄운다.
+Windows 상주 기동·재기동은 `start_screener.bat`(→ `_restart.ps1`), 종료는 `stop_screener.bat`
+(→ `_stop_all.ps1 -AllowElevate`). macOS/Linux에선 `python scheduler.py`를 직접 띄운다.
+
+`_restart.ps1`은 작업 스케줄러 작업 `AutoScreener`가 등록돼 있으면 **그 작업을 한 번 더 실행**시켜
+재기동한다. 작업은 S4U principal이라 스크리너가 **세션 0**에서 도는데, 대화형 세션의 PowerShell은
+그 프로세스의 CommandLine조차 못 읽고(Access denied) taskkill도 막힌다 → 예전처럼 `_stop_all.ps1`을
+직접 부르면 "정리 실패 → 포트 충돌 → 새 인스턴스 즉사 → `PID capture failed`"가 된다(2026-08-31 사고).
+같은 컨텍스트를 가진 건 작업 자신뿐이므로 정리·기동을 작업에 맡긴다 — UAC 불필요.
+작업이 없는 환경(다른 PC·클론 직후)에선 예전 경로(`_stop_all.ps1` → `start_helper.vbs`)로 폴백한다.
+정지는 세션 0 프로세스를 직접 죽여야 해서 관리자 승격이 필요하다(`-AllowElevate` → UAC 창).
+
+인스턴스 식별은 `scheduler.main`이 직접 쓰는 `data/screener.pid`가 1순위다 — 권한과 무관하게 읽힌다.
+폴백은 WMI CommandLine, 그다음 대시보드 포트(`DASHBOARD_PORT`) 리스너 PID.
+
+재부팅 후 자동 기동은 **작업 스케줄러 작업 `AutoScreener`**(로그온 1분 뒤 → `_autostart.vbs`)가
+맡는다. `_autostart.vbs`는 창 없이 기존 인스턴스 정리 → 직전 로그 1세대 백업 → 기동 순으로 돈다
+(`start_screener.bat`은 `pause`·콘솔 출력 때문에 무인 기동에 못 쓴다). 등록은 `schtasks`가 아니라
+`Register-ScheduledTask`로 — schtasks 기본값은 배터리 전원에서 실행을 막는다. 이게 없으면 Windows
+Update 자동 재부팅에 스크리너가 죽은 채 방치돼 keepalive가 못 돌고 인증이 만료된다(2026-08-12 사고).
 
 keepalive로 **못 막는** 만료도 있다: Claude Code는 토큰 유효기간과 별개로 주기적(체감 ~1주)으로
 대화형 재로그인을 요구한다. 이때 `credentials.json`의 만료 시각은 멀쩡해서 scheduler의 만료
@@ -182,6 +199,9 @@ keepalive로 **못 막는** 만료도 있다: Claude Code는 토큰 유효기간
 - DART 단일계정 API는 일부 종목 당기순이익이 누락될 수 있다.
 - Windows에서 `pythonw` + VBS redirect 조합이 sleep/wake 후 로그를 0바이트로 남기는 경우가 있다.
 - `data/`·`logs/`·`.venv/`·`.env`는 gitignore 대상. 클론 직후엔 비어 있고 첫 실행 시 생성된다.
+- 작업 스케줄러로 뜬 인스턴스는 **세션 0**에 있다. 대화형 PowerShell에서 `Get-CimInstance
+  Win32_Process`로 조회하면 `CommandLine`·`ExecutablePath`·소유자가 전부 빈 값이고 taskkill은
+  Access denied(5)다. "프로세스가 안 보인다"고 판단하기 전에 세션부터 확인할 것.
 - `*.bat`/`*.vbs`/`*.ps1`이 **LF(Unix) 줄바꿈**으로 저장되면 `cmd.exe`가 `.bat` 라인을 잘못 끊어
   `'ta'`/`'er.pid'`/`'D' is not recognized` 류 에러로 기동이 실패한다(`start_screener.bat` 먹통).
   `.gitattributes`가 `eol=crlf`로 강제하지만, 에디터가 LF로 덮어쓰면 재발 → 증상 보이면 줄바꿈부터 확인.

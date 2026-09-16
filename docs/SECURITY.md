@@ -7,8 +7,7 @@
 `.env`는 `.gitignore`로 제외되며, 키 이름 템플릿은 `.env.example` 참고.
 
 `.gitignore`가 제외하는 것: `.env`, `.venv/`, `__pycache__/`, `data/*.db`, `data/cache/`,
-`data/screener.pid`, `logs/`, 그리고 로컬 전용 보조 스크립트(`_diag*.py`, `_get_pid.ps1`,
-`_silence_console.py`).
+`data/screener.pid`, `logs/`, 그리고 로컬 전용 보조 스크립트(`_diag*.py`).
 
 ## 커밋 전 비밀값 차단 훅
 
