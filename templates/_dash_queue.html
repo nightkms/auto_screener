@@ -19,18 +19,10 @@
 </div>
 <div class="panel-body">
   {% if queue_items %}
-  {% set pick_badges = {
-      'search':  ['🔍', '검색상위', 'pick-search'],
-      'upper':   ['🚀', '상한가',   'pick-upper'],
-      'quant':   ['🔥', '거래량급증', 'pick-quant'],
-      'z-score': ['📊', '일반',     'pick-zscore'],
-      'manual':  ['✍️', '수기',     'pick-manual'],
-      'telegram':['📩', '텔레그램',  'pick-manual'],
-  } %}
   <table class="compact">
     <tbody>
     {% for q in queue_items %}
-      {% set pb = pick_badges.get(q.pick_source) %}
+      {% set pb = pick_badge(q.pick_source) %}
       <tr>
         <td style="width: 84px;">
           {% if q.status == 'pending' and q.attempts and q.attempts > 0 %}
@@ -43,7 +35,7 @@
         </td>
         <td>
           {{ q.name or q.ticker }}
-          {% if pb %}<span class="pick-src {{ pb[2] }}" title="선정근거: {{ pb[1] }}">{{ pb[0] }} {{ pb[1] }}</span>{% endif %}
+          {% if pb %}<span class="pick-src {{ pb[2] }}" title="{{ pb[3] }}">{{ pb[0] }} {{ pb[1] }}</span>{% endif %}
         </td>
         <td class="num" style="width: 24px;">
           <form method="post" action="/queue/{{ q.id }}/delete" data-ajax style="margin:0"

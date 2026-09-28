@@ -35,6 +35,35 @@ log = logging.getLogger("dashboard")
 app = FastAPI(title="AutoScreener")
 templates = Jinja2Templates(directory=str(Path(__file__).parent / "templates"))
 
+# 선정근거 배지: (아이콘, 라벨, css 클래스). 큐·최근·STRONG 패널이 공유.
+_PICK_BADGES = {
+    "search":   ("🔍", "검색상위", "pick-search"),
+    "upper":    ("🚀", "상한가", "pick-upper"),
+    "quant":    ("🔥", "거래량급증", "pick-quant"),
+    "z-score":  ("📊", "일반", "pick-zscore"),
+    "manual":   ("✍️", "수기", "pick-manual"),
+    "telegram": ("📩", "텔레그램", "pick-manual"),
+}
+
+
+def pick_badge(pick_source: str | None) -> tuple[str, str, str, str] | None:
+    """pick_source → (아이콘, 라벨, css, 툴팁). 모르는 값은 None.
+
+    event_watch는 'event:<사유>'(예: 'event:당일 +21.9% · 52주 신고가')로 남기므로
+    접두만 보고 급변감지 배지로 묶고, 사유는 툴팁에 담는다.
+    """
+    if not pick_source:
+        return None
+    if pick_source.startswith("event:"):
+        reason = pick_source[len("event:"):].strip()
+        return ("⚡", "급변감지", "pick-event",
+                f"선정근거: 급변감지 — {reason}" if reason else "선정근거: 급변감지")
+    b = _PICK_BADGES.get(pick_source)
+    return (*b, f"선정근거: {b[1]}") if b else None
+
+
+templates.env.globals["pick_badge"] = pick_badge
+
 # /trigger 중복 실행 방지
 _trigger_running = False
 
