@@ -156,6 +156,23 @@ def _build_synth_prompt(candidate: selector.Candidate,
     return "\n".join(lines)
 
 
+def _add_valuation_to_meta(md: str, valuation: dict[str, str]) -> str:
+    """머리 인용줄(`> 분석일: … / 시장: … / 종가: …`) 끝에 PER·PBR을 붙인다.
+    LLM에 맡기면 값이 틀리거나 빠질 수 있어 네이버 수치를 코드로 직접 넣는다.
+    텔레그램 1차 알림이 이 줄을 그대로 쓴다. 값이 없거나 이미 있으면 손대지 않는다."""
+    extra = [f"{label}: {valuation[key]}"
+             for key, label in (("per", "PER"), ("pbr", "PBR")) if valuation.get(key)]
+    if not extra:
+        return md
+    lines = md.split("\n")
+    for i, ln in enumerate(lines):
+        if ln.lstrip().startswith(">") and "분석일" in ln:
+            if "PER" not in ln:
+                lines[i] = ln.rstrip() + " / " + " / ".join(extra)
+            break
+    return "\n".join(lines)
+
+
 async def synthesize(candidate: selector.Candidate,
                      analysis: agents.StockAnalysis,
                      prior_summary: str = "") -> FinalReport:
@@ -192,7 +209,7 @@ async def synthesize(candidate: selector.Candidate,
         synth_failed = True
         pieces.append(f"\n\n_종합 호출 실패: {e}_\n")
 
-    markdown = "\n".join(pieces).strip()
+    markdown = _add_valuation_to_meta("\n".join(pieces).strip(), analysis.valuation)
     sub_ratings = {n: r.rating for n, r in analysis.sub_results.items()}
     avg = _avg(sub_ratings)
 

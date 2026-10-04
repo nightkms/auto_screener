@@ -2,9 +2,12 @@
 S5: 텔레그램 알림.
 
 종목 1건은 **메시지 2건**으로 나눠 보낸다 (`build_single_messages`):
-1. 요약(`summarize_brief`) — 등급·평균★·실적변화 이벤트·전문 링크 + 분석일/시장/종가
+1. 요약(`summarize_brief`) — 등급·평균★ + 분석일/시장/종가/PER/PBR
    + 한 줄 요약 + 영역별 매트릭스(점수와 함께 요지·평균까지)
-2. 상세(`summarize_detail`) — 위에 담기지 않은 **나머지 섹션 전부**를 요약 없이 그대로
+2. 상세(`summarize_detail`) — 실적변화 이벤트 + 위에 담기지 않은 **나머지 섹션 전부**를
+   요약 없이 그대로
+
+대시보드 링크(전문:)는 넣지 않는다 — 밖에서 보므로 localhost 링크는 열리지 않는다.
 
 마지막 메시지 끝에는 전송 시점의 남은 큐 개수(대기·실패·일시정지)를 한 줄 붙인다.
 
@@ -256,7 +259,7 @@ def _cap(blocks: list[str], max_len: int) -> str:
 
 
 def _meta_line(md: str) -> str:
-    """보고서 머리의 `> 분석일: … / 시장: … / 종가: …` 인용줄."""
+    """보고서 머리의 `> 분석일: … / 시장: … / 종가: … / PER: … / PBR: …` 인용줄."""
     m = re.search(r"^>\s*(.+)$", md, flags=re.MULTILINE)
     return _clean(m.group(1), 200) if m else ""
 
@@ -358,11 +361,9 @@ async def notify_run(run_id: int) -> bool:
                                                   -(r["avg_rating"] or 0)))
         for r in ordered:
             emoji = EMOJI.get(r["grade"], "❓")
-            report_url = config.dashboard_url(f"/report/{r['id']}")
             header = (
                 f"{emoji} {r['name']} ({r['ticker']})\n"
-                f"등급 {r['grade']} · 평균 ★ {r['avg_rating']}\n"
-                f"전문: {report_url}"
+                f"등급 {r['grade']} · 평균 ★ {r['avg_rating']}"
             )
             md_path = config.resolve_report_md(r["md_path"]) if r.get("md_path") else None
             if md_path and md_path.exists():
@@ -386,10 +387,11 @@ def build_single_messages(report_id: int,
     """단건 보고서 → 텔레그램 메시지 **2건**. 알림 대상이 아니면 빈 리스트.
 
     밖에서는 대시보드 링크를 못 여는 경우가 많아, 전문을 두 단계로 나눠 보낸다:
-    1) 요약 — 종목·등급·평균★·실적변화 이벤트·전문 링크 + 분석일/시장/종가 +
+    1) 요약 — 종목·등급·평균★ + 분석일/시장/종가/PER/PBR +
        한 줄 요약 + 영역별 매트릭스(요지·평균까지)
-    2) 상세 — 위에 담기지 않은 **나머지 섹션 전부**(급등 사유·핵심 포인트·단기
-       트리거·중장기 실적변화 이벤트·모니터링·등급 근거·이전 회차 대비 변동)
+    2) 상세 — 실적변화 이벤트 + 위에 담기지 않은 **나머지 섹션 전부**(급등 사유·
+       핵심 포인트·단기 트리거·중장기 실적변화 이벤트·모니터링·등급 근거·이전 회차 대비 변동)
+    대시보드 링크는 넣지 않는다(밖에서 보므로 localhost가 안 열린다).
     요약만 보고 넘길지, 이어지는 상세까지 읽을지 사용자가 고른다.
 
     알림 정책 (source별):
@@ -439,32 +441,29 @@ def build_single_messages(report_id: int,
     md = md_path.read_text(encoding="utf-8") if md_path and md_path.exists() else ""
 
     # 1차 — 요약
-    report_url = config.dashboard_url(f"/report/{report_id}")
     head = [f"{title} — {src_tag}",
             f"등급 {r['grade']} · 평균 ★ {r['avg_rating']}"]
     if trigger_note:
         head.append(f"⚡ 감지: {trigger_note}")
-    if event_note:
-        head.append(f"🏭 실적변화 이벤트(1~2년): {event_note}")
-    head.append(f"전문: {report_url}")
     # 분석이 실패해 섹션 없는 에러 문구만 남은 보고서도 있다 → 원문 앞부분으로 폴백
     brief_body = (summarize_brief(md) or _strip_markdown(md)[:BRIEF_MAX]
                   ) if md else "(보고서 파일 없음)"
     detail_body = summarize_detail(md) if md else ""
-    if detail_body:
+    if detail_body or event_note:
         head.append("▼ 상세는 바로 다음 메시지 (필요 없으면 넘기세요)")
     brief = "\n".join(head) + f"\n{'─' * 30}\n{brief_body}"
-    if not detail_body:
+    if not (detail_body or event_note):
         return [brief]
 
-    # 2차 — 상세
+    # 2차 — 상세 (실적변화 이벤트는 여기 머리에)
     tail = [f"{title} · 상세"]
+    if event_note:
+        tail.append(f"🏭 실적변화 이벤트(1~2년): {event_note}")
     # 범례는 실제로 `레버리지 A~D` 표기가 붙은 심층 보고에만 (경량 보고엔 정량평가 없음).
     # 본문 다른 곳의 '고레버리지' 같은 단어에 걸리지 않게 등급 문자까지 본다.
     if re.search(r"레버리지\s*[A-D]\b", detail_body + " " + event_note):
         tail.append(EVENT_LEGEND)
-    detail = ("\n".join(tail) + f"\n{'─' * 30}\n{detail_body}"
-              + f"\n\n전문: {report_url}")
+    detail = "\n".join(tail) + (f"\n{'─' * 30}\n{detail_body}" if detail_body else "")
     return [brief, detail]
 
 

@@ -96,6 +96,8 @@ class StockAnalysis:
     ticker: str
     name: str
     sub_results: dict[str, SubAgentResult] = field(default_factory=dict)
+    # 네이버 시세 지표(PER/PBR 등). 종합 보고서 머리줄에 그대로 박는다(LLM 경유 X).
+    valuation: dict[str, str] = field(default_factory=dict)
     total_tokens_in: int = 0
     total_tokens_out: int = 0
 
@@ -516,7 +518,8 @@ async def analyze_stock(candidate: selector.Candidate,
     ])
     sub_map = {r.name: r for r in results}
 
-    analysis = StockAnalysis(ticker=candidate.ticker, name=name, sub_results=sub_map)
+    analysis = StockAnalysis(ticker=candidate.ticker, name=name, sub_results=sub_map,
+                             valuation=dict(ctx.valuation) if ctx else {})
     analysis.total_tokens_in = sum(r.tokens_in for r in results)
     analysis.total_tokens_out = sum(r.tokens_out for r in results)
     log.info("[%s] 완료 avg★=%.2f tokens=%d/%d",
