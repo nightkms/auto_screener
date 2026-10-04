@@ -1,4 +1,4 @@
-claude-agent-sdk>=0.1.0
+claude-agent-sdk>=0.2.163
 pykrx>=1.0.45
 requests>=2.32.0
 python-dotenv>=1.0.1

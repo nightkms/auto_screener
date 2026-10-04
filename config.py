@@ -42,8 +42,11 @@ def dashboard_url(path: str = "") -> str:
     if path and not path.startswith("/"):
         path = "/" + path
     return base + path
-CLAUDE_SUB_MODEL = _opt("CLAUDE_SUB_MODEL", "claude-sonnet-4-6")
-CLAUDE_SYNTH_MODEL = _opt("CLAUDE_SYNTH_MODEL", "claude-opus-4-7")
+# 모델은 별칭(sonnet/opus)으로 둔다 → CLI가 아는 최신 버전으로 자동 해석된다.
+# 어느 버전이 될지는 claude-agent-sdk에 번들된 CLI 버전이 정하므로, 최신을 쓰려면 SDK를 올린다.
+# 특정 버전 고정이 필요하면 .env에 전체 ID(예: claude-sonnet-4-6)를 지정.
+CLAUDE_SUB_MODEL = _opt("CLAUDE_SUB_MODEL", "sonnet")
+CLAUDE_SYNTH_MODEL = _opt("CLAUDE_SYNTH_MODEL", "opus")
 LOG_LEVEL = _opt("LOG_LEVEL", "INFO")
 
 # ── 이벤트 재분석 감시 (event_watch) ────────────────────────────────────────
@@ -134,6 +137,18 @@ def require_telegram() -> tuple[str, str]:
 # 격리를 끄려면 .env에 SCREENER_CLAUDE_CONFIG_DIR=off (또는 none/0) → 홈 config를
 # 그대로 쓴다. 다른 경로를 쓰려면 그 경로를 지정.
 # (_opt가 빈 값을 default로 덮으므로 빈 값이 아니라 명시 sentinel로 끈다)
+#
+# 장기 OAuth 토큰(CLAUDE_CODE_OAUTH_TOKEN, `claude setup-token`으로 발급, 약 1년):
+# 설정돼 있으면 서브프로세스가 .credentials.json 대신 이 토큰을 쓴다(CLI 인증 우선순위상
+# credentials 파일보다 앞). 갱신·회전이 없으므로 홈 토큰 재시드·keepalive·만료 점검을
+# 전부 건너뛴다. 구독 토큰이라 Max 한도에서 차감되고 API 과금은 없다 — 단
+# ANTHROPIC_API_KEY/ANTHROPIC_AUTH_TOKEN이 env에 있으면 CLI가 그쪽을 먼저 써서 API
+# 과금으로 새므로, 이 프로세스(→ 상속되는 모든 서브프로세스) env에서 제거한다.
+CLAUDE_OAUTH_TOKEN = os.getenv("CLAUDE_CODE_OAUTH_TOKEN", "").strip()
+if CLAUDE_OAUTH_TOKEN:
+    for _k in ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"):
+        os.environ.pop(_k, None)
+
 _cfg_raw = _opt("SCREENER_CLAUDE_CONFIG_DIR", str(ROOT / ".claude_config"))
 CLAUDE_CONFIG_DIR = "" if _cfg_raw.lower() in ("off", "none", "0") else _cfg_raw
 
@@ -210,7 +225,10 @@ def refresh_isolated_credentials(cfg: Path) -> None:
 
 def credential_seconds_left() -> float | None:
     """서브프로세스가 실제로 쓸 토큰의 만료까지 남은 초. 만료면 음수, 모르면 None.
-    (격리 ON이면 격리본, OFF면 홈 토큰 기준.)"""
+    (격리 ON이면 격리본, OFF면 홈 토큰 기준.)
+    장기 토큰을 쓰면 credentials 파일은 무관하므로 None(=점검 생략)."""
+    if CLAUDE_OAUTH_TOKEN:
+        return None
     p = (Path(CLAUDE_CONFIG_DIR) / ".credentials.json"
          if CLAUDE_CONFIG_DIR else _HOME_CRED)
     exp = _cred_expiry_ms(p)
@@ -230,15 +248,18 @@ def sdk_env() -> dict[str, str]:
     전용으로 고정한다. SDK는 이 dict를 부모 환경에 '병합'하므로 PATH 등은 유지된다.
     빈 값으로 격리를 끄면 {} 를 반환(=홈 config 사용).
     매 호출마다 홈의 신선한 OAuth 토큰을 격리본으로 끌어온다 — 모든 LLM 호출이 이
-    함수를 거치므로 토큰이 항상 최신으로 유지된다."""
+    함수를 거치므로 토큰이 항상 최신으로 유지된다.
+    장기 토큰(CLAUDE_OAUTH_TOKEN)이 있으면 그것을 명시 주입하고 재시드는 생략한다."""
     global _sdk_env_cache
+    tok = {"CLAUDE_CODE_OAUTH_TOKEN": CLAUDE_OAUTH_TOKEN} if CLAUDE_OAUTH_TOKEN else {}
     if not CLAUDE_CONFIG_DIR:
-        _sdk_env_cache = {}
+        _sdk_env_cache = dict(tok)
         return _sdk_env_cache
     cfg = Path(CLAUDE_CONFIG_DIR)
     if _sdk_env_cache is None:
         cfg.mkdir(parents=True, exist_ok=True)
         _seed_claude_config(cfg)            # 최초 1회: 계정/설정 시드
-        _sdk_env_cache = {"CLAUDE_CONFIG_DIR": str(cfg)}
-    refresh_isolated_credentials(cfg)       # 매 호출: 홈이 더 신선하면 토큰 갱신
+        _sdk_env_cache = {"CLAUDE_CONFIG_DIR": str(cfg), **tok}
+    if not CLAUDE_OAUTH_TOKEN:
+        refresh_isolated_credentials(cfg)   # 매 호출: 홈이 더 신선하면 토큰 갱신
     return _sdk_env_cache

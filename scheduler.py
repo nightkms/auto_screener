@@ -121,8 +121,8 @@ def _schedule_keepalive_timer():
     정각 점검·타이머 발화 때마다 다시 불려 만료 시각 변화(대화형 세션이 갱신한 경우
     등)에 재동기화된다. 이미 만료됐으면 걸지 않는다 — 자력 복구가 불가능해 재시도
     루프만 돌기 때문이고, /login 후 다음 정각 점검이 다시 타이머를 세운다."""
-    if _sched is None:
-        return
+    if _sched is None or config.CLAUDE_OAUTH_TOKEN:
+        return                                 # 장기 토큰은 갱신 개념이 없다
     try:
         left = config.home_credential_seconds_left()
     except Exception:
