@@ -219,6 +219,9 @@ def _should_retry_analysis(analysis: agents.StockAnalysis) -> str:
             success_count += 1
         elif r.error:
             errors.append(r.error)
+        elif r.text and synthesizer.is_usage_limit(r.text):
+            # 한도초과는 예외 없이 안내문만 돌아온다 → 문구를 남겨야 원인 분류가 된다
+            errors.append("usage limit: " + r.text.strip().splitlines()[0][:150])
     if success_count < SUB_SUCCESS_THRESHOLD:
         sample = errors[0][:200] if errors else "no error message"
         return f"sub 성공 {success_count}/5 < {SUB_SUCCESS_THRESHOLD}: {sample}"
@@ -298,7 +301,9 @@ async def run_for_ticker(ticker: str, name: str = "",
         # 종합이 한도초과/실패면 점수만 있는 좀비 보고서를 저장하지 말고
         # 큐에 재시도를 떠넘긴다(다음 정각 reset_failed_to_pending에서 재개).
         if not report.ok:
-            raise RetryableAnalysisError(f"종합 실패/한도초과 → 큐 재시도 ({ticker})")
+            tail = " ".join(report.markdown.split())[-200:]
+            raise RetryableAnalysisError(
+                f"종합 실패/한도초과 → 큐 재시도 ({ticker}): {tail}")
 
         md_path = _save_markdown(week_label, report)
         sub_info = {

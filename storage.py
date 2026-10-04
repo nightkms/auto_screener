@@ -164,6 +164,20 @@ CREATE TABLE IF NOT EXISTS event_trigger (
     UNIQUE(ticker, event_date, kind)   -- 같은 날 같은 종류는 1회만 (쿨다운 아님)
 );
 CREATE INDEX IF NOT EXISTS idx_event_trigger_date ON event_trigger(event_date DESC);
+
+-- 분석 실패 이력. analysis_queue.last_error는 성공하면 지워지고 로그는 1세대만
+-- 보존돼서, '요즘 왜 자주 실패하나'를 사후에 가릴 근거가 남지 않았다(2026-09-28).
+CREATE TABLE IF NOT EXISTS analysis_failure (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts           TEXT NOT NULL,
+    qid          INTEGER,
+    ticker       TEXT,
+    name         TEXT,
+    source       TEXT,
+    kind         TEXT NOT NULL,        -- auth/limit/timeout/other
+    error        TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_analysis_failure_ts ON analysis_failure(ts DESC);
 """
 
 # 실패 분류는 사용하지 않는다 (모든 실패는 무한 retry, 정렬로만 우선순위 결정).
@@ -588,6 +602,31 @@ def clear_fail_streak() -> dict:
     if prev.get("count"):
         set_state(_FAIL_STREAK_KEY, "")
     return prev
+
+
+def record_failure(qid: int | None, ticker: str, name: str, source: str,
+                   kind: str, error: str) -> None:
+    """분석 실패 1건을 영구 기록. 스트릭과 달리 성공해도 지우지 않는다."""
+    with _connect() as c:
+        c.execute(
+            """INSERT INTO analysis_failure (ts, qid, ticker, name, source, kind, error)
+               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            (datetime.now().isoformat(timespec="seconds"), qid, ticker, name,
+             source, kind, (error or "")[:1000]),
+        )
+
+
+def failure_summary(days: int = 30) -> list[dict]:
+    """최근 days일 실패를 날짜×원인별로 집계. [{day, kind, n}] 날짜 오름차순."""
+    since = (datetime.now() - timedelta(days=days)).isoformat(timespec="seconds")
+    with _connect() as c:
+        rows = c.execute(
+            """SELECT substr(ts, 1, 10) AS day, kind, COUNT(*) AS n
+               FROM analysis_failure WHERE ts >= ?
+               GROUP BY day, kind ORDER BY day, kind""",
+            (since,),
+        ).fetchall()
+    return [dict(r) for r in rows]
 
 
 def is_queue_paused() -> bool:
@@ -1048,5 +1087,14 @@ def list_qa_messages(report_id: int, limit: int = 200) -> list[dict]:
 
 
 if __name__ == "__main__":
+    import sys
     init_db()
     print("DB:", config.DB_PATH)
+    # python storage.py failures [일수] — 날짜×원인별 실패 집계
+    if len(sys.argv) > 1 and sys.argv[1] == "failures":
+        days = int(sys.argv[2]) if len(sys.argv) > 2 else 30
+        rows = failure_summary(days)
+        if not rows:
+            print(f"최근 {days}일 실패 기록 없음")
+        for r in rows:
+            print(f"{r['day']}  {r['kind']:<8} {r['n']:>4}")

@@ -560,12 +560,35 @@ async def _note_queue_success(label: str) -> None:
             log.warning("복구 알림 전송 실패", exc_info=True)
 
 
-async def _note_queue_failure(ticker: str, name: str, error: str) -> None:
+def classify_failure(error: str) -> str:
+    """실패 원인 대분류: limit/auth/timeout/other.
+
+    한도초과를 인증보다 먼저 본다 — 안내문이 명시적이라 오분류 여지가 적고,
+    인증 쪽 'error result: success'는 원인을 가린 위장 문구라 폭이 넓다."""
+    import notifier
+    import synthesizer
+    if synthesizer.is_usage_limit(error):
+        return "limit"
+    if notifier.looks_like_auth_failure(error):
+        return "auth"
+    if "timeout" in (error or "").lower():
+        return "timeout"
+    return "other"
+
+
+async def _note_queue_failure(ticker: str, name: str, error: str,
+                              qid: int | None = None, source: str = "") -> None:
     """실패 1건 기록 후 임계(건수 AND 지속시간) 충족 시 텔레그램 알림.
 
     건수만 보면 큐에 쌓인 종목이 몇 분 만에 연달아 죽어 일시적 rate-limit에도
     알림이 튄다 → 최초 실패로부터의 경과 시간을 함께 요구한다."""
     import notifier
+    try:
+        kind = classify_failure(error)
+        storage.record_failure(qid, ticker, name, source, kind, error)
+        log.info("queue: 실패 원인 분류 qid=%s kind=%s", qid, kind)
+    except Exception:
+        log.warning("실패 이력 기록 실패", exc_info=True)
     now = time.time()
     st = storage.bump_fail_streak(
         ticker, name, error, now,
@@ -628,13 +651,13 @@ async def queue_worker():
             except pipeline.RetryableAnalysisError as e:
                 log.warning("queue: 실패 qid=%d: %s", qid, e)
                 storage.mark_queue_failed_retry(qid, str(e))
-                await _note_queue_failure(ticker, name, str(e))
+                await _note_queue_failure(ticker, name, str(e), qid, source)
                 await asyncio.sleep(30)
             except Exception as e:
                 err_str = f"{type(e).__name__}: {e}"
                 log.exception("queue: 실패 qid=%d: %s", qid, e)
                 storage.mark_queue_failed_retry(qid, err_str)
-                await _note_queue_failure(ticker, name, err_str)
+                await _note_queue_failure(ticker, name, err_str, qid, source)
                 await asyncio.sleep(30)
         except asyncio.CancelledError:
             log.info("queue_worker 취소됨")
