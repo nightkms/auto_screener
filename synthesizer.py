@@ -132,6 +132,10 @@ def _build_synth_prompt(candidate: selector.Candidate,
         lines.append("_위는 직전 회차 결론이다. 이번 회차 5명 보고(아래)와 비교해 "
                      "`## 이전 회차 대비 변동` 섹션을 작성하라._")
         lines.append("")
+    if analysis.research and analysis.research.text:
+        lines.append("## [research] 사전 리서치 브리프 (별점 없음 — 5명이 공유한 사실 기반)")
+        lines.append(analysis.research.text.strip())
+        lines.append("")
     for sub_name in agents.SUB_AGENTS:
         r = analysis.sub_results.get(sub_name)
         if not r:

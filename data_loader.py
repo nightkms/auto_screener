@@ -94,6 +94,9 @@ class StockContext:
     # 우선주 분석 시 본주 비교용. 보통주 분석에선 None.
     # {'common_ticker','common_name','series','common_valuation'}
     preferred_info: dict | None = None
+    # 정기보고서 '사업의 내용' 요약. agents.enrich_business_overview가 채운다.
+    # {'rcept_no','report_nm','rcept_dt','summary'}
+    business_overview: dict | None = None
 
     def to_dict(self) -> dict:
         return {
@@ -105,6 +108,7 @@ class StockContext:
             "valuation": self.valuation, "consensus": self.consensus,
             "peers": self.peers, "short_sale": self.short_sale,
             "preferred_info": self.preferred_info,
+            "business_overview": self.business_overview,
         }
 
 
@@ -548,6 +552,68 @@ def fetch_document(rcept_no: str,
     if len(text) > max_chars:
         text = text[:max_chars] + "\n…(이하 생략)"
     return text, fields
+
+
+# ---------------------------------------------------------------------------
+# 정기보고서 '사업의 내용' (주요 제품·매출처·고객 집중도·생산능력)
+# ---------------------------------------------------------------------------
+# 재무 숫자·공시 제목만으론 "누구에게 파는 회사인가"가 안 보인다. 예) 에스앤디는
+# 매출 대부분이 삼양식품향인데 컨텍스트에 그 사실이 없어, 검색을 덜 하는 모델(Sonnet 5.5)은
+# 삼양의 지앤에프 인수(내재화 리스크)에 끝내 닿지 못했다(2026-10-12). 정기보고서 본문
+# 'II. 사업의 내용'에 매출처·생산능력이 있으므로 이를 요약해 컨텍스트에 깐다.
+PERIODIC_LOOKBACK_DAYS = 400        # 직전 사업보고서까지 닿는 범위
+_BIZ_SECTION_START = re.compile(r"II\.\s*사업의\s*내용")
+_BIZ_SECTION_END = re.compile(r"III\.\s*재무에\s*관한\s*사항")
+
+
+def latest_periodic_report(corp_code: str) -> dict | None:
+    """가장 최근 정기보고서(사업/반기/분기, 정정 포함) 1건의 메타.
+    반환: {'rcept_no','report_nm','rcept_dt'} 또는 None."""
+    try:
+        j = _api("list.json", corp_code=corp_code, pblntf_ty="A",
+                 bgn_de=(date.today() - timedelta(days=PERIODIC_LOOKBACK_DAYS)).strftime("%Y%m%d"),
+                 end_de=date.today().strftime("%Y%m%d"), page_count=10)
+    except Exception as e:
+        log.warning("정기보고서 목록 실패 corp=%s: %s", corp_code, e)
+        return None
+    for r in j.get("list") or []:
+        if any(k in r.get("report_nm", "") for k in ("사업보고서", "반기보고서", "분기보고서")):
+            return {"rcept_no": r["rcept_no"], "report_nm": r["report_nm"],
+                    "rcept_dt": r.get("rcept_dt", "")}
+    return None
+
+
+def fetch_business_section(rcept_no: str, max_chars: int = 30000) -> str | None:
+    """정기보고서 원문에서 'II. 사업의 내용' 구간만 평문으로 잘라 반환.
+    정기보고서 ZIP에는 감사보고서 등 첨부 XML이 같이 들어 있으므로 본문 '{rcept_no}.xml'을 고른다.
+    목차가 본문 앞에 반복될 수 있어 시작 후보 중 가장 긴 구간을 택한다."""
+    try:
+        r = requests.get(f"{DART_BASE}/document.xml",
+                         params={"crtfc_key": config.DART_API_KEY,
+                                 "rcept_no": rcept_no},
+                         timeout=60)
+        r.raise_for_status()
+        with zipfile.ZipFile(io.BytesIO(r.content)) as z:
+            names = z.namelist()
+            main = f"{rcept_no}.xml" if f"{rcept_no}.xml" in names else (names[0] if names else "")
+            if not main:
+                return None
+            xml = z.read(main).decode("utf-8", errors="replace")
+    except Exception as e:
+        log.warning("정기보고서 원문 fetch 실패 rcept=%s: %s", rcept_no, e)
+        return None
+    text = _clean_dart_xml(xml)
+    best = ""
+    for m in _BIZ_SECTION_START.finditer(text):
+        end = _BIZ_SECTION_END.search(text, m.end())
+        seg = text[m.start():end.start() if end else m.start() + max_chars]
+        if len(seg) > len(best):
+            best = seg
+    if not best:
+        return None
+    if len(best) > max_chars:
+        best = best[:max_chars] + "\n…(이하 생략)"
+    return best
 
 
 # ---------------------------------------------------------------------------

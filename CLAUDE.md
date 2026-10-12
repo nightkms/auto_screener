@@ -57,8 +57,11 @@ selector.py     검색상위 → 상한가·거래량 급증 → 부족분 시�
 data_loader.py  DART OpenAPI: 회사·재무·최근 공시 + 네이버 시세
         │
         ▼
-agents.py       Claude Sonnet × 5 병렬 (valuation/industry/price_flow/catalyst/risk)
-        │       각 서브에이전트는 prompts/<name>.txt 시스템 프롬프트 + WebSearch 허용
+agents.py       ① 사업 구조: 정기보고서 'II. 사업의 내용' 요약(매출처·고객 집중도, rcept_no 캐시)
+        │       ② 사전 리서치: 수석 리서처 1명(prompts/research.txt)이 WebSearch 12회+ 로 브리프 작성,
+        │          얕거나 '확인 안 됨'이 남으면 같은 세션 resume으로 후속 라운드(최대 2)
+        │       ③ Claude Sonnet × 5 병렬 (valuation/industry/price_flow/catalyst/risk)
+        │          브리프를 출발점으로 각자 영역을 더 검색(프롬프트별 필수 조사·`출처:` 블록 의무)
         ▼
 synthesizer.py  Claude Opus: 5개 보고 종합 + 등급(STRONG/WATCH/INTEREST/SKIP)
         │
@@ -80,7 +83,7 @@ synthesizer.py  Claude Opus: 5개 보고 종합 + 등급(STRONG/WATCH/INTEREST/S
 | `selector.py` | hot pick 선정 (3단계, [정책](docs/design/selector.md)) |
 | `event_watch.py` | 이벤트 재분석 트리거. 최근 분석 종목 중 오늘 급변한 종목을 30일 dedup 무시하고 재투입 |
 | `data_loader.py` | DART/네이버 수집, 분석 컨텍스트 패킹 |
-| `agents.py` | 5개 서브에이전트 병렬 실행 (`MAX_TURNS_PER_AGENT`, sub별 timeout) |
+| `agents.py` | 사업 구조 요약 → 사전 리서치(+후속 라운드) → 5개 서브에이전트 병렬 (`MAX_TURNS_PER_AGENT`, `RESEARCH_*`) |
 | `synthesizer.py` | 종합·등급 판정 (fallback rule 포함) |
 | `pipeline.py` | 전체 오케스트레이션 (`run_once`, `enqueue_hot_picks`) |
 | `notifier.py` | 텔레그램 전송 (소스별 알림 정책, 연속 실패/복구 알림) |
@@ -137,6 +140,8 @@ keepalive로 **못 막는** 만료도 있다: Claude Code는 토큰 유효기간
 - 모델은 `config.CLAUDE_SUB_MODEL`(Sonnet), `config.CLAUDE_SYNTH_MODEL`(Opus)로만 참조. 하드코딩 금지.
 - 서브에이전트 턴 상한은 `agents.MAX_TURNS_PER_AGENT`, 보고서 Q&A는 `report_chat.MAX_TURNS`.
   검색이 많은 작업이 한도에서 끊기면 상한을 올리고, 끊겨도 부분 결과를 살리는 폴백을 둔다.
+- Sonnet 5.5부터 모델이 "필요하면 검색"을 최소한으로 해석한다(종목당 검색 26회→4회로 급감, 2026-10).
+  검색이 필요한 조사는 프롬프트에 **필수 질문·최소 횟수**로 명시하고, 업종 중립으로 쓴다(특정 종목 예시 금지).
 
 ### 프롬프트 (`prompts/`)
 - 분석 룰을 바꿀 때는 코드가 아니라 해당 `prompts/*.txt`를 수정한다.

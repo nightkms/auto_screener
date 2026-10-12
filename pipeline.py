@@ -103,6 +103,10 @@ async def run_once(top_n: int = config.TOP_N,
                     storage.log_usage(run_id, config.CLAUDE_SUB_MODEL,
                                       r.tokens_in, r.tokens_out,
                                       f"sub:{r.name}:{c.ticker}")
+                if analysis.research:
+                    storage.log_usage(run_id, config.CLAUDE_SUB_MODEL,
+                                      analysis.research.tokens_in, analysis.research.tokens_out,
+                                      f"research:{c.ticker}")
                 report = await synthesizer.synthesize(
                     c, analysis, prior_summary=prior,
                 )
@@ -285,6 +289,10 @@ async def run_for_ticker(ticker: str, name: str = "",
             storage.log_usage(run_id, config.CLAUDE_SUB_MODEL,
                               r.tokens_in, r.tokens_out,
                               f"sub:{r.name}:{ticker}")
+        if analysis.research:
+            storage.log_usage(run_id, config.CLAUDE_SUB_MODEL,
+                              analysis.research.tokens_in, analysis.research.tokens_out,
+                              f"research:{ticker}")
 
         # sub 성공 < 3이면 보고서 저장하지 않고 큐에 재시도 떠넘김.
         retry_reason = _should_retry_analysis(analysis)

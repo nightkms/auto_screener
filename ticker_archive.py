@@ -169,6 +169,35 @@ def cache_disclosure_summaries(ticker: str, name: str,
     return len(rows)
 
 
+def read_business_overview(ticker: str, name: str = "") -> dict:
+    """정기보고서 '사업의 내용' 요약 캐시. {'rcept_no','report_nm','rcept_dt','summary'}.
+    정기보고서는 분기에 1번 바뀌므로 rcept_no가 같으면 LLM 재요약 없이 재사용한다."""
+    p = ticker_dir(ticker, name) / "business_overview.json"
+    if not p.exists():
+        return {}
+    try:
+        return json.loads(p.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+
+
+def save_business_overview(ticker: str, name: str, overview: dict) -> None:
+    if not overview.get("summary"):
+        return
+    (ticker_dir(ticker, name) / "business_overview.json").write_text(
+        json.dumps(overview, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def save_research_brief(ticker: str, name: str, text: str) -> Path:
+    """사전 리서치 브리프(출처 포함)를 회차별로 보존. 출처 추적용 — 보고서 표면엔 요약만 남아도
+    어떤 검색 근거로 판단했는지 사후에 되짚을 수 있어야 한다."""
+    folder = ticker_dir(ticker, name) / "research"
+    folder.mkdir(exist_ok=True)
+    p = folder / f"{datetime.now().strftime('%Y%m%d_%H%M')}.md"
+    p.write_text(text.strip() + "\n", encoding="utf-8")
+    return p
+
+
 def save_financials_snapshot(ticker: str, name: str,
                               financials: dict[str, dict[str, float]]) -> None:
     """최신 재무 스냅샷을 단일 파일로 저장 (덮어쓰기)."""

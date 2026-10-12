@@ -24,6 +24,7 @@ from claude_agent_sdk import (
     ClaudeAgentOptions,
     ResultMessage,
     TextBlock,
+    ToolUseBlock,
     query,
 )
 
@@ -71,6 +72,8 @@ MAX_TURNS_PER_AGENT = {
     "price_flow": 8,
     "catalyst": 12,
     "risk": 8,
+    # 사전 리서치(수석 리서처): 체크리스트 9항목 + 단서 추적 → 턴을 넉넉히.
+    "research": 30,
 }
 
 # SDK 호출이 hang되면 종목 1개가 큐 워커와 스케줄러 이벤트 루프를 무기한 점유한다
@@ -78,6 +81,8 @@ MAX_TURNS_PER_AGENT = {
 # sub들은 병렬이므로 종목당 wall-clock도 동일. timeout 도달 시 RetryableError로
 # 전환되어 다음 정각에 재시도된다.
 SUB_AGENT_TIMEOUT_S = 600
+# 사전 리서치는 검색 12회+ WebFetch까지 하므로 sub보다 길게 준다.
+RESEARCH_TIMEOUT_S = 900
 
 
 @dataclass
@@ -89,6 +94,8 @@ class SubAgentResult:
     tokens_out: int = 0
     elapsed_s: float = 0.0
     error: str = ""
+    searches: int = 0            # WebSearch 호출 수 (검색 깊이 모니터링·후속 라운드 판단용)
+    session_id: str = ""         # 후속 라운드에서 같은 세션을 이어가기(resume) 위함
 
 
 @dataclass
@@ -96,6 +103,8 @@ class StockAnalysis:
     ticker: str
     name: str
     sub_results: dict[str, SubAgentResult] = field(default_factory=dict)
+    # 사전 리서치 브리프(별점 없음 → 평균에서 제외). 실패하면 None.
+    research: SubAgentResult | None = None
     # 네이버 시세 지표(PER/PBR 등). 종합 보고서 머리줄에 그대로 박는다(LLM 경유 X).
     valuation: dict[str, str] = field(default_factory=dict)
     total_tokens_in: int = 0
@@ -224,6 +233,14 @@ def _build_user_prompt(name: str, ticker: str, candidate: selector.Candidate,
         if ctx.homepage:
             lines.append(f"- 홈페이지: {ctx.homepage}")
         lines.append("")
+        bo = ctx.business_overview
+        if bo and bo.get("summary"):
+            lines.append(f"## 사업 구조 (DART {bo.get('report_nm','')} 'II. 사업의 내용' 요약, "
+                         f"rcept_no={bo.get('rcept_no','')})")
+            lines.append(bo["summary"])
+            lines.append("_거래 상대방이 'A사'처럼 익명이면 WebSearch로 실명을 확인하라. 특정 고객·공급처 "
+                         "의존이 높으면 그 상대방의 동향(내재화·인수·조달처 다변화·발주 변화)을 반드시 검색하라._")
+            lines.append("")
         if ctx.valuation:
             lines.append("## 시장 가격 지표 (네이버 실시간)")
             v = ctx.valuation
@@ -316,7 +333,9 @@ def _build_user_prompt(name: str, ticker: str, candidate: selector.Candidate,
 # SDK 호출
 # ---------------------------------------------------------------------------
 async def _run_one(sub_name: str, user_prompt: str,
-                   model: str | None = None) -> SubAgentResult:
+                   model: str | None = None,
+                   timeout_s: int = SUB_AGENT_TIMEOUT_S,
+                   resume: str | None = None) -> SubAgentResult:
     system = _load_prompt(sub_name)
     opts = ClaudeAgentOptions(
         system_prompt=system,
@@ -325,11 +344,13 @@ async def _run_one(sub_name: str, user_prompt: str,
         allowed_tools=["WebSearch", "WebFetch"],
         max_turns=MAX_TURNS_PER_AGENT.get(sub_name, 6),
         env=config.sdk_env(),          # 홈 ~/.claude.json 동시 write 경합 회피
+        resume=resume,
     )
     started = time.time()
     pieces: list[str] = []
     tokens_in = tokens_out = 0
     err = ""
+    meta = {"searches": 0, "session_id": ""}
 
     async def _consume() -> tuple[int, int]:
         t_in = t_out = 0
@@ -338,7 +359,10 @@ async def _run_one(sub_name: str, user_prompt: str,
                 for block in msg.content:
                     if isinstance(block, TextBlock):
                         pieces.append(block.text)
+                    elif isinstance(block, ToolUseBlock) and block.name == "WebSearch":
+                        meta["searches"] += 1
             elif isinstance(msg, ResultMessage):
+                meta["session_id"] = getattr(msg, "session_id", "") or ""
                 usage = getattr(msg, "usage", None)
                 if usage:
                     t_in = (usage.get("input_tokens") or 0) + \
@@ -348,12 +372,11 @@ async def _run_one(sub_name: str, user_prompt: str,
 
     try:
         tokens_in, tokens_out = await asyncio.wait_for(
-            _consume(), timeout=SUB_AGENT_TIMEOUT_S,
+            _consume(), timeout=timeout_s,
         )
     except asyncio.TimeoutError:
-        err = f"TimeoutError: sub agent exceeded {SUB_AGENT_TIMEOUT_S}s"
-        log.warning("[%s] %ds timeout 도달 → 강제 중단", sub_name,
-                    SUB_AGENT_TIMEOUT_S)
+        err = f"TimeoutError: sub agent exceeded {timeout_s}s"
+        log.warning("[%s] %ds timeout 도달 → 강제 중단", sub_name, timeout_s)
     except Exception as e:
         err = f"{type(e).__name__}: {e}"
         log.exception("[%s] 실패", sub_name)
@@ -363,7 +386,64 @@ async def _run_one(sub_name: str, user_prompt: str,
         name=sub_name, text=text, rating=rating,
         tokens_in=tokens_in, tokens_out=tokens_out,
         elapsed_s=round(time.time() - started, 1), error=err,
+        searches=meta["searches"], session_id=meta["session_id"],
     )
+
+
+# 사전 리서치 후속 라운드. Sonnet 5.5는 최소 검색 횟수를 지시해도 7회 안팎에서 스스로 멈추고
+# '확인 안 됨'을 남긴다(2026-10-12 실측). 같은 세션을 이어(resume) 빈칸만 다시 파게 한다.
+RESEARCH_MIN_SEARCHES = 12
+RESEARCH_MAX_FOLLOWUPS = 2
+_GAP_PAT = re.compile(r"확인(?:하지 못|되지 않|\s*안\s*됨|\s*못)|추정 어려움|찾지 못")
+
+
+def _research_gaps(text: str) -> list[str]:
+    """브리프에서 '확인 안 됨'류 문장이 든 줄을 뽑는다 (후속 라운드 과제 목록). 출처 줄은 제외."""
+    return [ln.strip()[:200] for ln in text.splitlines()
+            if _GAP_PAT.search(ln) and not ln.lstrip().startswith(("- [", "["))]
+
+
+async def _run_research(user_prompt: str) -> SubAgentResult:
+    """수석 리서처 실행 + 검색이 얕거나 빈칸이 남으면 같은 세션으로 후속 라운드.
+    후속 라운드가 브리프를 못 내면 직전 브리프를 그대로 쓴다. 토큰·검색 수는 라운드 합산."""
+    res = await _run_one("research", user_prompt, timeout_s=RESEARCH_TIMEOUT_S)
+    for round_no in range(1, RESEARCH_MAX_FOLLOWUPS + 1):
+        if not res.text or not res.session_id:
+            break
+        gaps = _research_gaps(res.text)
+        if res.searches >= RESEARCH_MIN_SEARCHES and not gaps:
+            break
+        gap_list = "\n".join(f"- {g}" for g in gaps[:12]) or "- (명시된 빈칸 없음)"
+        follow = (
+            f"후속 조사 {round_no}라운드. 지금까지 WebSearch {res.searches}회 — 최소 "
+            f"{RESEARCH_MIN_SEARCHES}회 기준"
+            + ("에 못 미친다." if res.searches < RESEARCH_MIN_SEARCHES else "는 넘겼다.")
+            + "\n\n아래는 브리프에서 '확인 안 됨'으로 남은 항목이다. 각각 **검색어를 바꿔**(회사명 대신 "
+            "거래 상대방·제품명·공장명·사건명으로, 기간을 좁혀서 등) 다시 검색하고, 필요하면 WebFetch로 "
+            "원문을 읽어라. 체크리스트 중 얕게 넘어간 항목(증권사 리포트·주가 큰 움직임의 원인·핵심 "
+            "변수 관련 최신 뉴스)도 보강하라.\n\n"
+            f"{gap_list}\n\n"
+            "끝나면 새로 확인한 사실을 반영해 **브리프 전체를 같은 형식으로 다시 출력**하라(출처 번호 "
+            "갱신). 여전히 못 찾은 것만 '검색했으나 확인 안 됨'으로 남긴다. 사실 확정 규칙(독립 출처 "
+            "2곳 이상이면 단정)을 다시 적용하라."
+        )
+        log.info("research 후속 %d라운드: 검색 %d회, 빈칸 %d건", round_no, res.searches, len(gaps))
+        nxt = await _run_one("research", follow, timeout_s=RESEARCH_TIMEOUT_S,
+                             resume=res.session_id)
+        ok = "리서치 브리프" in nxt.text
+        res = SubAgentResult(
+            name="research", text=nxt.text if ok else res.text, rating=None,
+            tokens_in=res.tokens_in + nxt.tokens_in,
+            tokens_out=res.tokens_out + nxt.tokens_out,
+            elapsed_s=round(res.elapsed_s + nxt.elapsed_s, 1),
+            error="" if ok else (nxt.error or "후속 라운드 브리프 없음"),
+            searches=res.searches + nxt.searches,
+            session_id=nxt.session_id or res.session_id,
+        )
+        if not ok:
+            log.warning("research 후속 %d라운드 실패(%s) → 직전 브리프 사용", round_no, res.error)
+            break
+    return res
 
 
 async def keepalive_refresh(timeout_s: int = 60) -> None:
@@ -491,6 +571,76 @@ async def enrich_disclosures(ticker: str, name: str,
     return len(newly)
 
 
+BUSINESS_SUMMARY_TIMEOUT_S = 180
+
+_BUSINESS_SUMMARY_SYSTEM = (
+    "너는 한국 DART 정기보고서의 'II. 사업의 내용'을 분석가용으로 압축하는 도구다.\n"
+    "다음 항목을 본문에 있는 범위에서만 불릿 8~12줄로 요약하라. 수치에는 기준 시점(기수·연월)을 붙인다.\n"
+    "1. 주요 제품·사업부문과 매출 비중(%), 수출/내수(지역) 비중\n"
+    "2. 주요 매출처·고객 집중도 — 고객명이 'A사'처럼 익명이면 익명 그대로 쓰고, "
+    "매출액·매출채권 표가 있으면 그 고객의 비중(%)을 계산해 적는다. 단일 고객 비중이 높으면 "
+    "'단일 고객 의존 높음'을 명시한다.\n"
+    "3. 주요 원재료와 매입처(특정 공급처 의존 여부), 원재료 가격 추이\n"
+    "4. 생산능력·생산실적·가동률, 증설 계획 — 반기·분기 보고서 수치는 해당 기간 누적이므로 "
+    "전기(연간) 수치와 비교할 땐 연환산 값을 함께 적고 '연환산'이라고 표시한다.\n"
+    "5. 업종 고유 핵심 지표가 본문에 있으면 포함: 수주잔고·신규수주(조선·건설·장비), "
+    "파이프라인·임상 단계·기술이전 계약(바이오), 영업 지표·건전성(금융), 자회사 현황(지주사) 등\n"
+    "6. 주요 계약, 신규 사업, 회사가 서술한 경쟁 현황·시장점유율\n"
+    "규칙: 본문에 없는 항목은 생략한다(지어내지 말 것). 추측·전망·매수/매도 의견 금지. 한국어."
+)
+
+
+async def enrich_business_overview(ctx: data_loader.StockContext) -> bool:
+    """최신 정기보고서 '사업의 내용'을 요약해 ctx.business_overview에 채운다.
+    rcept_no 단위 캐시(business_overview.json) — 새 정기보고서가 나올 때만 LLM 요약.
+    실패하면 직전 캐시라도 쓴다. 반환: 새로 요약했으면 True."""
+    cached = ticker_archive.read_business_overview(ctx.ticker, ctx.name)
+    latest = await asyncio.to_thread(data_loader.latest_periodic_report, ctx.corp_code)
+    if cached.get("summary") and (not latest or cached.get("rcept_no") == latest["rcept_no"]):
+        ctx.business_overview = cached
+        return False
+    if not latest:
+        return False
+
+    body = await asyncio.to_thread(data_loader.fetch_business_section, latest["rcept_no"])
+    summary = ""
+    if body:
+        opts = ClaudeAgentOptions(
+            system_prompt=_BUSINESS_SUMMARY_SYSTEM,
+            model=config.CLAUDE_SUB_MODEL,
+            permission_mode="bypassPermissions",
+            allowed_tools=[],
+            max_turns=1,
+            env=config.sdk_env(),
+        )
+        prompt = (f"회사: {ctx.name} ({ctx.ticker})\n"
+                  f"보고서: {latest['report_nm']} (접수 {latest['rcept_dt']}, rcept_no={latest['rcept_no']})\n\n"
+                  f"[II. 사업의 내용 원문]\n{body}\n\n위 원문을 규칙에 맞게 요약하라.")
+        pieces: list[str] = []
+
+        async def _consume() -> None:
+            async for msg in query(prompt=prompt, options=opts):
+                if isinstance(msg, AssistantMessage):
+                    for block in msg.content:
+                        if isinstance(block, TextBlock):
+                            pieces.append(block.text)
+
+        try:
+            await asyncio.wait_for(_consume(), timeout=BUSINESS_SUMMARY_TIMEOUT_S)
+            summary = "\n".join(pieces).strip()
+        except Exception as e:
+            log.warning("[%s] 사업의 내용 요약 실패: %s", ctx.ticker, e)
+
+    if not summary:
+        if cached.get("summary"):
+            ctx.business_overview = cached   # 옛 보고서 요약이라도 없는 것보단 낫다
+        return False
+    overview = {**latest, "summary": summary}
+    ticker_archive.save_business_overview(ctx.ticker, ctx.name, overview)
+    ctx.business_overview = overview
+    return True
+
+
 async def analyze_stock(candidate: selector.Candidate,
                         ctx: data_loader.StockContext | None,
                         prior_summary: str = "") -> StockAnalysis:
@@ -507,21 +657,55 @@ async def analyze_stock(candidate: selector.Candidate,
                 log.info("[%s] 공시 본문 요약 %d건 추가", candidate.ticker, n)
         except Exception as e:
             log.warning("[%s] 공시 본문 요약 실패: %s", candidate.ticker, e)
+    # 정기보고서 '사업의 내용'(매출처·고객 집중도 등) 요약 주입 (보고서 단위 캐시).
+    if ctx:
+        try:
+            if await enrich_business_overview(ctx):
+                log.info("[%s] 사업의 내용 요약 갱신 (%s)", candidate.ticker,
+                         ctx.business_overview.get("report_nm"))
+        except Exception as e:
+            log.warning("[%s] 사업의 내용 요약 실패: %s", candidate.ticker, e)
     user_prompt = _build_user_prompt(
         name, candidate.ticker, candidate, ctx,
         prior_summary=prior_summary,
     )
 
+    # 사전 리서치: 수석 리서처 1명이 먼저 깊게 검색해 브리프를 만들고 5명이 그 위에서 시작한다
+    # (TradingAgents식 분업). sub들은 턴이 짧아 기본 사실 확인에 턴을 쓰면 자기 영역을 못 판다.
+    # 실패해도 브리프 없이 진행한다.
+    log.info("[%s] %s 사전 리서치 시작", candidate.ticker, name)
+    research = await _run_research(user_prompt)
+    import synthesizer   # 순환 import 회피 (synthesizer가 agents를 import)
+    if research.text and synthesizer.is_usage_limit(research.text):
+        research.error = "usage limit: " + research.text.strip().splitlines()[0][:150]
+        research.text = ""
+    if research.text:
+        try:
+            ticker_archive.save_research_brief(candidate.ticker, name, research.text)
+        except Exception as e:
+            log.warning("[%s] 리서치 브리프 저장 실패: %s", candidate.ticker, e)
+        sub_prompt = (user_prompt + "\n\n## 🔬 사전 리서치 브리프 (수석 리서처, 출처 포함)\n"
+                      "_아래 사실은 이미 검색·확인됐다. 다시 찾지 말고 출발점으로 삼아, 네 영역의 "
+                      "쟁점을 더 깊게 검색하라. 출처가 붙은 사실은 '추정'으로 약화하지 말 것._\n\n"
+                      + research.text)
+    else:
+        log.warning("[%s] 사전 리서치 실패(%s) → 브리프 없이 진행",
+                    candidate.ticker, research.error or "빈 결과")
+        sub_prompt = user_prompt
+
+    log.info("[%s] %s 사전 리서치 완료: 검색 %d회, %.0fs", candidate.ticker, name,
+             research.searches, research.elapsed_s)
     log.info("[%s] %s 분석 시작 (5개 병렬)", candidate.ticker, name)
     results = await asyncio.gather(*[
-        _run_one(sub, user_prompt) for sub in SUB_AGENTS
+        _run_one(sub, sub_prompt) for sub in SUB_AGENTS
     ])
     sub_map = {r.name: r for r in results}
 
     analysis = StockAnalysis(ticker=candidate.ticker, name=name, sub_results=sub_map,
-                             valuation=dict(ctx.valuation) if ctx else {})
-    analysis.total_tokens_in = sum(r.tokens_in for r in results)
-    analysis.total_tokens_out = sum(r.tokens_out for r in results)
+                             valuation=dict(ctx.valuation) if ctx else {},
+                             research=research if research.text else None)
+    analysis.total_tokens_in = sum(r.tokens_in for r in results) + research.tokens_in
+    analysis.total_tokens_out = sum(r.tokens_out for r in results) + research.tokens_out
     log.info("[%s] 완료 avg★=%.2f tokens=%d/%d",
              candidate.ticker, analysis.average_rating(),
              analysis.total_tokens_in, analysis.total_tokens_out)
