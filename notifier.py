@@ -154,7 +154,9 @@ def _strip_markdown(md: str) -> str:
 #   둘을 합쳐 보고서 전체가 되도록 — 링크를 못 여는 상황이 기본 전제다.
 # ---------------------------------------------------------------------------
 SUMMARY_MAX = 7000          # 상세 본문 글자 상한 (넘치면 _chunk가 여러 건으로 분할)
-BRIEF_MAX = 1200            # 1차 요약 글자 상한 (한 줄 요약 + 영역별 점수·요지)
+# 1차 요약 글자 상한 — 한 줄 요약·요지는 자르지 않으므로 이건 비정상적으로 긴 보고서 방어용.
+# 1차에서 잘린 내용은 2차에도 없다(2차는 1차 섹션을 뺀다) → 정상 보고서는 닿지 않게 넉넉히.
+BRIEF_MAX = 2500
 
 # 1차 요약이 이미 담는 섹션 → 2차 상세에선 중복이라 뺀다
 _BRIEF_SECTIONS = ("한 줄 요약", "영역별 매트릭스")
@@ -200,24 +202,25 @@ def _sec(secs: dict[str, str], *keys: str) -> str:
     return ""
 
 
-def _clean(text: str, limit: int = 90, keep_meta: bool = False) -> str:
-    """마크다운 장식 제거 후 길이 제한. keep_meta면 `[시점=…]` 태그를 남긴다."""
+def _clean(text: str, limit: int | None = 90, keep_meta: bool = False) -> str:
+    """마크다운 장식 제거 후 길이 제한(None이면 자르지 않음). keep_meta면 `[시점=…]` 태그를 남긴다."""
     t = re.sub(r"`([^`]+?)`", r"\1", text)     # 백틱 먼저 풀어야 메타 태그가 잡힌다
     if not keep_meta:
         t = _META_PAT.sub("", t)
     t = re.sub(r"\*\*(.+?)\*\*", r"\1", t)
     t = t.replace("`", "").strip()             # 짝 안 맞는 잔재 백틱
     t = re.sub(r"\s+", " ", t)
-    return t if len(t) <= limit else t[: limit - 1].rstrip() + "…"
+    return t if limit is None or len(t) <= limit else t[: limit - 1].rstrip() + "…"
 
 
-def _matrix_block(sec: str, note_len: int = 0) -> str:
-    """영역별 매트릭스 표 → 점수 한 줄. note_len>0이면 영역별 '요지'까지 줄바꿈해 붙인다.
+def _matrix_block(sec: str, notes: bool = False) -> str:
+    """영역별 매트릭스 표 → 점수 한 줄. notes면 영역별 '요지'까지 줄바꿈해 붙인다.
 
         ⭐ 밸류 4.0 · 산업 4.0 · 수급 3.5 · 촉매 3.5 · 리스크 3.5  (평균 3.70)
-        • 밸류 4.0 — PER 19.8·PBR 2.4, 목표가 74,500원(+27.6% 여력)…
+        • 밸류 4.0 — PER 19.8·PBR 2.4, 목표가 74,500원(+27.6% 여력)
         ...
     점수만으론 왜 그 등급인지 알 수 없어서, 1차 요약엔 요지를 반드시 함께 넣는다.
+    요지는 자르지 않는다 — 2차 상세는 매트릭스 섹션을 빼므로 잘린 뒷부분은 어디에도 안 남는다.
     """
     rows: list[tuple[str, str, str]] = []
     avg = ""
@@ -242,11 +245,11 @@ def _matrix_block(sec: str, note_len: int = 0) -> str:
     head = "⭐ " + " · ".join(f"{n} {s}" for n, s, _ in rows)
     if avg:
         head += f"  (평균 {avg})"
-    if note_len <= 0:
+    if not notes:
         return head
     lines = [head]
     for n, s, note in rows:
-        lines.append(f"• {n} {s} — {_clean(note, note_len)}" if note
+        lines.append(f"• {n} {s} — {_clean(note, None)}" if note
                      else f"• {n} {s}")
     return "\n".join(lines)
 
@@ -279,8 +282,8 @@ def summarize_brief(md: str, max_len: int = BRIEF_MAX) -> str:
     secs = _sections(md)
     blocks = [
         _meta_line(md),
-        _clean(_sec(secs, "한 줄 요약"), 400),
-        _matrix_block(_sec(secs, "매트릭스"), note_len=120),
+        _clean(_sec(secs, "한 줄 요약"), None),
+        _matrix_block(_sec(secs, "매트릭스"), notes=True),
     ]
     return _cap(blocks, max_len)
 
