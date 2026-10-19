@@ -73,7 +73,11 @@ MAX_TURNS_PER_AGENT = {
     "catalyst": 12,
     "risk": 8,
     # 사전 리서치(수석 리서처): 체크리스트 9항목 + 단서 추적 → 턴을 넉넉히.
-    "research": 30,
+    # 검색 최소 20회(2026-10-19 상향) + WebFetch 원문 읽기까지 담으려면 30턴은 빠듯하다.
+    "research": 45,
+    # 강세/약세 연구원(debate.py): 검색 없이 보고서로만 토론 → 1~2턴이면 충분.
+    "bull": 2,
+    "bear": 2,
 }
 
 # SDK 호출이 hang되면 종목 1개가 큐 워커와 스케줄러 이벤트 루프를 무기한 점유한다
@@ -81,7 +85,7 @@ MAX_TURNS_PER_AGENT = {
 # sub들은 병렬이므로 종목당 wall-clock도 동일. timeout 도달 시 RetryableError로
 # 전환되어 다음 정각에 재시도된다.
 SUB_AGENT_TIMEOUT_S = 600
-# 사전 리서치는 검색 12회+ WebFetch까지 하므로 sub보다 길게 준다.
+# 사전 리서치는 검색 20회+ WebFetch까지 하므로 sub보다 길게 준다.
 RESEARCH_TIMEOUT_S = 900
 
 
@@ -335,13 +339,14 @@ def _build_user_prompt(name: str, ticker: str, candidate: selector.Candidate,
 async def _run_one(sub_name: str, user_prompt: str,
                    model: str | None = None,
                    timeout_s: int = SUB_AGENT_TIMEOUT_S,
-                   resume: str | None = None) -> SubAgentResult:
+                   resume: str | None = None,
+                   tools: list[str] | None = None) -> SubAgentResult:
     system = _load_prompt(sub_name)
     opts = ClaudeAgentOptions(
         system_prompt=system,
         model=model or config.CLAUDE_SUB_MODEL,
         permission_mode="bypassPermissions",
-        allowed_tools=["WebSearch", "WebFetch"],
+        allowed_tools=["WebSearch", "WebFetch"] if tools is None else tools,
         max_turns=MAX_TURNS_PER_AGENT.get(sub_name, 6),
         env=config.sdk_env(),          # 홈 ~/.claude.json 동시 write 경합 회피
         resume=resume,
@@ -392,8 +397,9 @@ async def _run_one(sub_name: str, user_prompt: str,
 
 # 사전 리서치 후속 라운드. Sonnet 5.5는 최소 검색 횟수를 지시해도 7회 안팎에서 스스로 멈추고
 # '확인 안 됨'을 남긴다(2026-10-12 실측). 같은 세션을 이어(resume) 빈칸만 다시 파게 한다.
-RESEARCH_MIN_SEARCHES = 12
-RESEARCH_MAX_FOLLOWUPS = 2
+# 2026-10-19: 토큰 여유가 생겨 12→20회, 후속 2→3라운드로 상향(깊이 우선).
+RESEARCH_MIN_SEARCHES = 20
+RESEARCH_MAX_FOLLOWUPS = 3
 _GAP_PAT = re.compile(r"확인(?:하지 못|되지 않|\s*안\s*됨|\s*못)|추정 어려움|찾지 못")
 
 

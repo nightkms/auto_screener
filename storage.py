@@ -151,6 +151,21 @@ CREATE TABLE IF NOT EXISTS app_state (
     value TEXT
 );
 
+-- 회고 교훈 (TradingAgents reflection 메모리의 경량판). retrospect.py가 주말마다 쌓고,
+-- debate.py(bull/bear)·synthesizer가 분석 때 역할별로 주입받는다.
+CREATE TABLE IF NOT EXISTS lesson (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    role         TEXT NOT NULL,        -- bull / bear / synthesizer
+    situation    TEXT NOT NULL,        -- 언제 적용하는가 (업종 중립)
+    lesson       TEXT NOT NULL,        -- 무엇을 다르게 할 것인가
+    evidence     TEXT,                 -- 근거 사례 '종목(코드) 등급 → 수익률'
+    week_label   TEXT,                 -- 생성 회고 주차
+    active       INTEGER NOT NULL DEFAULT 1,
+    retired_note TEXT,                 -- 비활성 사유 (회고가 폐기 / 상한 초과)
+    created_at   TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_lesson_role ON lesson(role, active);
+
 CREATE TABLE IF NOT EXISTS event_trigger (
     id           INTEGER PRIMARY KEY AUTOINCREMENT,
     ticker       TEXT NOT NULL,
@@ -547,6 +562,35 @@ def set_state(key: str, value: str) -> None:
                ON CONFLICT(key) DO UPDATE SET value=excluded.value""",
             (key, value),
         )
+
+
+# ── 회고 교훈 (lesson) ────────────────────────────────────────────────────
+def active_lessons(role: str | None = None) -> list[dict]:
+    """활성 교훈. role을 주면 그 역할만, 최신 우선."""
+    q = "SELECT * FROM lesson WHERE active=1"
+    args: tuple = ()
+    if role:
+        q += " AND role=?"
+        args = (role,)
+    with _connect() as c:
+        return [dict(r) for r in c.execute(q + " ORDER BY id DESC", args).fetchall()]
+
+
+def add_lesson(role: str, situation: str, lesson: str, evidence: str,
+               week_label: str) -> int:
+    with _connect() as c:
+        cur = c.execute(
+            """INSERT INTO lesson (role, situation, lesson, evidence, week_label, created_at)
+               VALUES (?, ?, ?, ?, ?, ?)""",
+            (role, situation, lesson, evidence, week_label,
+             datetime.now().isoformat(timespec="seconds")),
+        )
+        return cur.lastrowid
+
+
+def retire_lesson(lesson_id: int, note: str) -> None:
+    with _connect() as c:
+        c.execute("UPDATE lesson SET active=0, retired_note=? WHERE id=?", (note, lesson_id))
 
 
 # ── 연속 실패 스트릭 (알림용) ──────────────────────────────────────────────

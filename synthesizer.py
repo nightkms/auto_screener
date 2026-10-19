@@ -1,7 +1,8 @@
 """
 S4: 종합 + 등급 판정.
 
-5개 서브에이전트 결과를 Opus(또는 설정 모델)로 묶어 매트릭스 + 마크다운 보고서 생성.
+5개 서브에이전트 결과 + 강세/약세 토론 기록을 Opus(또는 설정 모델)로 묶어 매트릭스 + 마크다운
+보고서 생성. 토론 판정(TradingAgents의 Research Manager)도 여기서 한다.
 GRADE 토큰을 파싱해 등급(STRONG/WATCH/INTEREST/SKIP)을 확정한다.
 
 CLI:
@@ -29,6 +30,7 @@ from claude_agent_sdk import (
 import agents
 import config
 import data_loader
+import lessons
 import selector
 
 log = logging.getLogger("synthesizer")
@@ -103,7 +105,8 @@ def _avg(ratings: dict[str, float | None]) -> float:
 # ---------------------------------------------------------------------------
 def _build_synth_prompt(candidate: selector.Candidate,
                         analysis: agents.StockAnalysis,
-                        prior_summary: str = "") -> str:
+                        prior_summary: str = "",
+                        debate_text: str = "") -> str:
     lines: list[str] = []
     lines.append(f"# 종합 보고 요청: {analysis.name} ({analysis.ticker})")
     lines.append(f"- 시장: {candidate.market}, 종가: {candidate.close:,}원")
@@ -157,6 +160,15 @@ def _build_synth_prompt(candidate: selector.Candidate,
             lines.append(f"## [{sub_name}] 별점=미산정(보고 없음)")
             lines.append("(빈 결과 — 이 영역만 N/A 처리하고 평균에서 제외)")
         lines.append("")
+    if debate_text:
+        # debate.py: 강세/약세 연구원 토론 기록. 판정(Research Manager)은 이 종합이 맡는다.
+        lines.append("## [debate] 강세/약세 연구원 토론 기록 (판정 대상)")
+        lines.append(debate_text.strip())
+        lines.append("")
+    memo = lessons.block("synthesizer")
+    if memo:
+        lines.append(memo)
+        lines.append("")
     return "\n".join(lines)
 
 
@@ -179,7 +191,8 @@ def _add_valuation_to_meta(md: str, valuation: dict[str, str]) -> str:
 
 async def synthesize(candidate: selector.Candidate,
                      analysis: agents.StockAnalysis,
-                     prior_summary: str = "") -> FinalReport:
+                     prior_summary: str = "",
+                     debate_text: str = "") -> FinalReport:
     system = (config.PROMPTS_DIR / "synthesizer.txt").read_text(encoding="utf-8")
     opts = ClaudeAgentOptions(
         system_prompt=system,
@@ -189,7 +202,7 @@ async def synthesize(candidate: selector.Candidate,
         max_turns=2,
         env=config.sdk_env(),          # 홈 ~/.claude.json 동시 write 경합 회피
     )
-    user_prompt = _build_synth_prompt(candidate, analysis, prior_summary)
+    user_prompt = _build_synth_prompt(candidate, analysis, prior_summary, debate_text)
 
     log.info("[%s] 종합 시작", candidate.ticker)
     started = time.time()

@@ -19,6 +19,9 @@ auto_screener/
 ├── data_loader.py          DART 재무·공시 수집
 ├── agents.py               Claude 5개 서브에이전트 (Agent SDK 병렬)
 ├── synthesizer.py          종합 + 등급 판정 (STRONG/WATCH/INTEREST/SKIP)
+├── debate.py               강세/약세 연구원 토론 (TradingAgents Researcher Team)
+├── retrospect.py           주말 회고: 등급 vs 실제 성과 → 역할별 교훈 (reflection)
+├── lessons.py              교훈 메모리 → 토론·종합에 자동 주입
 ├── notifier.py             텔레그램 푸시
 ├── storage.py              SQLite (실행·보고서·토큰)
 ├── pipeline.py             전체 오케스트레이션
@@ -104,6 +107,9 @@ python event_watch.py --enqueue # 위 + 큐 투입
 python data_loader.py 005930    # 삼성전자 DART 정보
 python agents.py 260970         # 에스앤디 5 서브에이전트 분석
 python synthesizer.py 260970    # 위 + 종합 등급
+python debate.py 260970         # 위 + 강세/약세 토론
+python retrospect.py --stats    # 등급별 이후 성과 통계 (LLM 호출 없음)
+python retrospect.py --lessons  # 쌓인 교훈 목록
 python notifier.py test         # 텔레그램 봇 핑
 python notifier.py last         # 최근 실행 결과 다시 푸시
 ```
@@ -176,7 +182,10 @@ data_loader.py ◄── DART OpenAPI (회사·재무·최근 90일 공시)
 agents.py     ◄── Claude Sonnet 4.6 × 5 (병렬, WebSearch 허용)
         │
         ▼
-synthesizer.py ◄── Claude Opus 4.7 (종합 + 등급)
+debate.py     ◄── 강세/약세 연구원 토론 (Sonnet, 2라운드)
+        │
+        ▼
+synthesizer.py ◄── Claude Opus 4.7 (토론 판정 + 종합 + 등급, 회고 교훈 주입)
         │
         ├──► storage.py (SQLite + analysis/auto/<주차>/*.md)
         └──► notifier.py (텔레그램, STRONG/WATCH만)

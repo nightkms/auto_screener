@@ -1,7 +1,7 @@
 """
 S7: 전체 파이프라인.
 
-selector → data_loader → agents (병렬) → synthesizer → storage + notifier.
+selector → data_loader → agents (병렬) → debate(강세/약세) → synthesizer(판정) → storage + notifier.
 1회 실행 단위. scheduler.py가 매주 토 08:00에 호출한다.
 
 CLI:
@@ -22,6 +22,7 @@ from pathlib import Path
 import agents
 import config
 import data_loader
+import debate
 import notifier
 import selector
 import storage
@@ -29,6 +30,9 @@ import synthesizer
 import ticker_archive
 
 log = logging.getLogger("pipeline")
+
+# 보고서 끝에 붙는 토론 전문 섹션 제목. notifier가 이 섹션은 텔레그램에서 뺀다.
+DEBATE_SECTION = "## 🗣 토론 전문"
 
 
 def _week_label(d: date | None = None) -> str:
@@ -45,6 +49,29 @@ def _save_markdown(run_label: str, report: synthesizer.FinalReport) -> str:
     path.write_text(report.markdown, encoding="utf-8")
     # ANALYSIS_DIR 기준 상대경로로 저장 → 폴더를 통째로 옮겨도 보고서가 열림.
     return path.relative_to(config.ANALYSIS_DIR).as_posix()
+
+
+async def _debate_and_synthesize(run_id: int, cand: selector.Candidate,
+                                 analysis: agents.StockAnalysis,
+                                 prior_summary: str) -> synthesizer.FinalReport:
+    """강세/약세 토론(debate.py) → 종합·판정(synthesizer). TradingAgents의
+    Researcher Team → Research Manager 구간. 토론이 실패해도 종합은 진행한다.
+    토론 전문은 보고서 끝 `## 🗣 토론 전문`에 남긴다(대시보드·회고용, 텔레그램엔 안 나감).
+    반환 보고서의 tokens에는 토론 토큰까지 더해 보고서 총량에 잡히게 한다."""
+    deb = await debate.run(cand, analysis)
+    if deb.tokens_in or deb.tokens_out:
+        storage.log_usage(run_id, config.CLAUDE_SUB_MODEL,
+                          deb.tokens_in, deb.tokens_out, f"debate:{cand.ticker}")
+    transcript = deb.transcript() if deb.turns else ""
+    report = await synthesizer.synthesize(cand, analysis, prior_summary=prior_summary,
+                                          debate_text=transcript)
+    storage.log_usage(run_id, config.CLAUDE_SYNTH_MODEL,
+                      report.tokens_in, report.tokens_out, f"synth:{cand.ticker}")
+    if report.ok and transcript:
+        report.markdown = report.markdown.rstrip() + f"\n\n{DEBATE_SECTION}\n{transcript}\n"
+    report.tokens_in += deb.tokens_in
+    report.tokens_out += deb.tokens_out
+    return report
 
 
 async def run_once(top_n: int = config.TOP_N,
@@ -107,12 +134,7 @@ async def run_once(top_n: int = config.TOP_N,
                     storage.log_usage(run_id, config.CLAUDE_SUB_MODEL,
                                       analysis.research.tokens_in, analysis.research.tokens_out,
                                       f"research:{c.ticker}")
-                report = await synthesizer.synthesize(
-                    c, analysis, prior_summary=prior,
-                )
-                storage.log_usage(run_id, config.CLAUDE_SYNTH_MODEL,
-                                  report.tokens_in, report.tokens_out,
-                                  f"synth:{c.ticker}")
+                report = await _debate_and_synthesize(run_id, c, analysis, prior)
 
                 # 종합 실패/한도초과면 좀비 보고서를 저장하지 않고 이 종목은 건너뜀.
                 if not report.ok:
@@ -299,12 +321,7 @@ async def run_for_ticker(ticker: str, name: str = "",
         if retry_reason:
             raise RetryableAnalysisError(retry_reason)
 
-        report = await synthesizer.synthesize(
-            cand, analysis, prior_summary=prior_summary,
-        )
-        storage.log_usage(run_id, config.CLAUDE_SYNTH_MODEL,
-                          report.tokens_in, report.tokens_out,
-                          f"synth:{ticker}")
+        report = await _debate_and_synthesize(run_id, cand, analysis, prior_summary)
 
         # 종합이 한도초과/실패면 점수만 있는 좀비 보고서를 저장하지 말고
         # 큐에 재시도를 떠넘긴다(다음 정각 reset_failed_to_pending에서 재개).

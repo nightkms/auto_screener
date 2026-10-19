@@ -160,6 +160,9 @@ BRIEF_MAX = 2500
 
 # 1차 요약이 이미 담는 섹션 → 2차 상세에선 중복이라 뺀다
 _BRIEF_SECTIONS = ("한 줄 요약", "영역별 매트릭스")
+# 텔레그램에 안 내보내는 섹션. 토론 전문은 길어서(라운드당 2천 자 안팎) 대시보드·회고용으로만 둔다
+# — 요지는 종합의 `⚖️ 강세·약세 토론 판정` 섹션이 2차 상세로 전한다.
+_SKIP_SECTIONS = ("토론 전문",)
 
 # 매트릭스 영역명 축약 (부분 문자열 매칭)
 _AREA_SHORT = {
@@ -299,6 +302,8 @@ def summarize_detail(md: str, max_len: int = SUMMARY_MAX) -> str:
     for title, body in _sections(md).items():
         if any(_norm(k) in _norm(title) for k in _BRIEF_SECTIONS):
             continue                      # 1차와 중복
+        if any(_norm(k) in _norm(title) for k in _SKIP_SECTIONS):
+            continue
         body = _drop_tokens(body)
         if not body:
             continue                      # 토큰만 있던 섹션(실적변화 이벤트 판정 등)
@@ -604,6 +609,19 @@ async def notify_analysis_stalled(count: int, hours: float,
     lines.append(f"대시보드: {config.dashboard_url()}")
     async with aiohttp.ClientSession() as session:
         return await _send(session, "\n".join(lines), parse_mode=None)
+
+
+async def notify_retrospect(md: str, filename: str) -> bool:
+    """주말 회고 전송. 출처 목록은 길어서 빼고(파일엔 있음) 나머지를 분할 전송."""
+    body = re.sub(r"\n출처:\s*\n(?:\[\d+\].*\n?)+", "\n", md)
+    text = _strip_markdown(body) + f"\n\n📁 전문(출처 포함): analysis/retrospect/{filename}"
+    ok = True
+    async with aiohttp.ClientSession() as session:
+        for i, chunk in enumerate(_chunk(text)):
+            if i:
+                await asyncio.sleep(RATE_GAP)
+            ok = await _send(session, chunk, parse_mode=None) and ok
+    return ok
 
 
 async def notify_analysis_recovered(fail_count: int, ticker: str = "") -> bool:

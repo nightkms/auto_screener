@@ -70,6 +70,17 @@ EVENT_PLUNGE = _opt("EVENT_PLUNGE", "0").lower() not in ("0", "off", "false")
 # 52주 신고가 경신(하루 0~7건). 끄려면 .env에 EVENT_HIGH52=0
 EVENT_HIGH52 = _opt("EVENT_HIGH52", "1").lower() not in ("0", "off", "false")
 
+# ── 강세/약세 토론 (debate.py) — TradingAgents Researcher Team ──────────────
+# 분석가 5명 보고 뒤, 강세·약세 연구원(Sonnet)이 N라운드 번갈아 주장·반박하고 synthesizer가
+# 판정한다. 라운드당 Sonnet 2회. 0이면 토론 생략(경량 모드).
+DEBATE_ROUNDS = int(_opt("DEBATE_ROUNDS", "2"))
+
+# ── 주말 회고 (retrospect.py) — TradingAgents reflection ────────────────────
+# 과거 보고서의 등급과 이후 실제 수익률을 비교해 역할별(bull/bear/synthesizer) 교훈을
+# lesson 테이블에 쌓고, 다음 분석부터 자동 주입한다. 주말(토·일)에 주차당 1회만,
+# hourly 잡이 조건을 보고 띄운다(고정 시각 cron 금지 — 노트북 전제).
+RETROSPECT_ENABLED = _opt("RETROSPECT_ENABLED", "1").lower() not in ("0", "off", "false")
+
 # ── 연속 실패 알림 (queue_worker) ──────────────────────────────────────────
 # Claude Code는 토큰 만료와 별개로 주기적(체감 ~1주)으로 대화형 재로그인을 요구한다.
 # 이때 credentials.json의 만료 시각은 멀쩡해 보이므로 scheduler의 만료 점검
@@ -90,6 +101,7 @@ DATA_DIR = ROOT / "data"
 DB_PATH = DATA_DIR / "screener.db"
 ANALYSIS_DIR = ROOT / "analysis" / "auto"
 BY_TICKER_DIR = ROOT / "analysis" / "by_ticker"
+RETROSPECT_DIR = ROOT / "analysis" / "retrospect"   # 주말 회고 (retrospect.py)
 LOG_DIR = ROOT / "logs"
 PROMPTS_DIR = ROOT / "prompts"
 

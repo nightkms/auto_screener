@@ -38,6 +38,7 @@ import dashboard
 import event_watch
 import notifier
 import pipeline
+import retrospect
 import storage
 
 log = logging.getLogger("scheduler")
@@ -180,13 +181,19 @@ async def _check_credentials_and_alert():
 
 
 async def _scheduled_run():
-    """매시각 정각: 인증 점검 → failed 큐 복귀 → 이벤트 재분석 → 핫 종목 enqueue."""
+    """매시각 정각: 인증 점검 → (주말이면 회고) → failed 큐 복귀 → 이벤트 재분석 → 핫 종목 enqueue."""
     await _check_credentials_and_alert()       # 토큰 갱신·만료 알림 (paused와 무관)
     # 일시정지 중이면 큐를 건드리지 않는다 (복귀·신규 enqueue 모두 스킵 →
     # 재개 시 큐가 폭증하지 않게). 재시작해도 paused는 영속 유지된다.
     if storage.is_queue_paused():
         log.info("스케줄 트리거 스킵: 큐 일시정지 상태")
         return
+    # 주말 회고: 토·일 정각마다 조건만 보고, 이번 주차를 못 끝냈으면 백그라운드로 띄운다.
+    # 고정 시각 cron이 아니라 hourly 체크라 노트북이 주말 중 언제 켜져도 그 주 회고는 돈다.
+    try:
+        retrospect.maybe_start()
+    except Exception:
+        log.exception("스케줄: 주말 회고 시작 실패")
     log.info("스케줄 트리거: hourly reset + enqueue")
     try:
         rn = storage.reset_failed_to_pending()

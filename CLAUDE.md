@@ -13,6 +13,10 @@
 - 외부 데이터: DART OpenAPI(재무·공시), 네이버 모바일/검색 페이지(시세·핫 종목).
 - 저장: SQLite(`data/screener.db`) + Markdown 보고서.
 
+**컨셉: TradingAgents(멀티 에이전트 트레이딩 프레임워크)의 경량화 버전.** 분석가 팀 → 강세/약세 토론 →
+판정 → (회고로) reflection 메모리 구조를 따른다. 트레이더·리스크 토론 팀은 뺐고, 매수/매도 결정 대신 등급을 낸다.
+새 기능은 "원작 구성요소를 되살리는가, 경량화 취지를 해치는가"로 판단한다.
+
 사용자 대상 사용법·설치는 [README.md](README.md), 설계 근거는 [docs/design/](docs/design/) 참고.
 
 ## 메모리 시스템 (자동 로드)
@@ -58,12 +62,16 @@ data_loader.py  DART OpenAPI: 회사·재무·최근 공시 + 네이버 시세
         │
         ▼
 agents.py       ① 사업 구조: 정기보고서 'II. 사업의 내용' 요약(매출처·고객 집중도, rcept_no 캐시)
-        │       ② 사전 리서치: 수석 리서처 1명(prompts/research.txt)이 WebSearch 12회+ 로 브리프 작성,
-        │          얕거나 '확인 안 됨'이 남으면 같은 세션 resume으로 후속 라운드(최대 2)
+        │       ② 사전 리서치: 수석 리서처 1명(prompts/research.txt)이 WebSearch 20회+ 로 브리프 작성,
+        │          얕거나 '확인 안 됨'이 남으면 같은 세션 resume으로 후속 라운드(최대 3)
         │       ③ Claude Sonnet × 5 병렬 (valuation/industry/price_flow/catalyst/risk)
         │          브리프를 출발점으로 각자 영역을 더 검색(프롬프트별 필수 조사·`출처:` 블록 의무)
         ▼
-synthesizer.py  Claude Opus: 5개 보고 종합 + 등급(STRONG/WATCH/INTEREST/SKIP)
+debate.py       강세/약세 연구원(Sonnet, prompts/bull·bear.txt)이 DEBATE_ROUNDS 라운드 주장·반박
+        │       (검색 없이 분석가 보고로만, 각자 세션 resume). 실패해도 종합은 진행
+        ▼
+synthesizer.py  Claude Opus: 5개 보고 + 토론 판정(Research Manager) + 등급(STRONG/WATCH/INTEREST/SKIP)
+        │       보고서 끝에 `## 🗣 토론 전문` 부착(대시보드·회고용, 텔레그램엔 안 나감)
         │
         ├──► storage.py     SQLite + analysis/auto/<주차>/*.md
         └──► notifier.py    텔레그램 2단계 푸시(요약 → 상세)
@@ -72,6 +80,13 @@ synthesizer.py  Claude Opus: 5개 보고 종합 + 등급(STRONG/WATCH/INTEREST/S
 ```
 
 큐 워커·가격 알림 워커는 `dashboard.py`에 있고 `scheduler.lifespan`이 백그라운드 태스크로 띄운다.
+
+**주말 회고 = reflection**(`retrospect.py`): 토·일 정각마다 hourly 잡이 조건을 보고, 그 주차를 아직
+못 끝냈으면 백그라운드로 1회 돈다(실패 시 주차당 3회까지 재시도, 상태는 `app_state.retrospect_week`).
+35~200일 전 보고서의 등급 vs 이후 1·3개월 수익률을 코드로 집계 → 과대평가/놓침 사례를 Opus 감사관이
+검색해 역할별(bull/bear/synthesizer) 교훈 작성 → `lesson` 테이블에 저장(폐기 포함, 역할당 활성 10개 상한)
+→ **다음 분석부터 `lessons.block(role)`로 자동 주입**. 회고 전문은 `analysis/retrospect/<주차>.md` + 텔레그램.
+`prompts/*.txt`는 회고가 고치지 않는다 — 교훈은 메모리로만 쌓인다.
 
 ## 모듈 책임
 
@@ -85,6 +100,9 @@ synthesizer.py  Claude Opus: 5개 보고 종합 + 등급(STRONG/WATCH/INTEREST/S
 | `data_loader.py` | DART/네이버 수집, 분석 컨텍스트 패킹 |
 | `agents.py` | 사업 구조 요약 → 사전 리서치(+후속 라운드) → 5개 서브에이전트 병렬 (`MAX_TURNS_PER_AGENT`, `RESEARCH_*`) |
 | `synthesizer.py` | 종합·등급 판정 (fallback rule 포함) |
+| `debate.py` | 강세/약세 연구원 토론 (TradingAgents Researcher Team) |
+| `retrospect.py` | 주말 회고: 등급 vs 실제 성과 → 역할별 교훈 저장 (reflection) |
+| `lessons.py` | 교훈 메모리 주입·상한 관리 |
 | `pipeline.py` | 전체 오케스트레이션 (`run_once`, `enqueue_hot_picks`) |
 | `notifier.py` | 텔레그램 전송 (소스별 알림 정책, 연속 실패/복구 알림) |
 | `report_chat.py` | 대시보드 보고서 Q&A (Sonnet + WebSearch/WebFetch) |
@@ -105,6 +123,10 @@ python agents.py 260970         # 5 서브에이전트만
 python synthesizer.py 260970    # 위 + 종합 등급
 python notifier.py test         # 텔레그램 봇 핑
 python report_chat.py <id> "질문"  # 보고서 Q&A 단독 테스트
+python debate.py 260970          # 분석가 5명 → 강세/약세 토론까지 (종합·저장 없음)
+python retrospect.py --stats     # 등급별 성과 통계·사례만 (LLM 호출 없음)
+python retrospect.py --lessons   # 쌓인 활성 교훈 목록
+python retrospect.py --no-send   # 회고 지금 1회 (저장만)
 ```
 
 Windows 상주 기동·재기동은 `start_screener.bat`(→ `_restart.ps1`), 종료는 `stop_screener.bat`
