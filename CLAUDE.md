@@ -13,8 +13,10 @@
 - 외부 데이터: DART OpenAPI(재무·공시), 네이버 모바일/검색 페이지(시세·핫 종목).
 - 저장: SQLite(`data/screener.db`) + Markdown 보고서.
 
-**컨셉: TradingAgents(멀티 에이전트 트레이딩 프레임워크)의 경량화 버전.** 분석가 팀 → 강세/약세 토론 →
-판정 → (회고로) reflection 메모리 구조를 따른다. 트레이더·리스크 토론 팀은 뺐고, 매수/매도 결정 대신 등급을 낸다.
+**컨셉: TradingAgents(멀티 에이전트 트레이딩 프레임워크)를 따른다.** 분석가 팀 → 강세/약세 토론 → 리서치
+매니저(투자 계획) → 트레이더 → 리스크 토론(공격·보수·중립) → 포트폴리오 매니저 최종 BUY/HOLD/SELL →
+(주말 회고로) reflection 메모리. 등급(STRONG~SKIP)은 알림 정책용으로 함께 유지한다.
+등급만 내던 경량판은 git 태그 `lite-grade-v1`(2026-10-19). `TRADING_ENABLED=0`이면 그 흐름으로 돌아간다.
 새 기능은 "원작 구성요소를 되살리는가, 경량화 취지를 해치는가"로 판단한다.
 
 사용자 대상 사용법·설치는 [README.md](README.md), 설계 근거는 [docs/design/](docs/design/) 참고.
@@ -70,12 +72,17 @@ agents.py       ① 사업 구조: 정기보고서 'II. 사업의 내용' 요약
 debate.py       강세/약세 연구원(Sonnet, prompts/bull·bear.txt)이 DEBATE_ROUNDS 라운드 주장·반박
         │       (검색 없이 분석가 보고로만, 각자 세션 resume). 실패해도 종합은 진행
         ▼
-synthesizer.py  Claude Opus: 5개 보고 + 토론 판정(Research Manager) + 등급(STRONG/WATCH/INTEREST/SKIP)
-        │       보고서 끝에 `## 🗣 토론 전문` 부착(대시보드·회고용, 텔레그램엔 안 나감)
+synthesizer.py  Claude Opus = Research Manager: 5개 보고 + 토론 판정 + 투자 계획 + 등급(STRONG~SKIP)
+        ▼
+trading.py      트레이더(Sonnet) 거래 제안 → 리스크 토론(공격·보수·중립 Sonnet × RISK_DEBATE_ROUNDS)
+        │       → 포트폴리오 매니저(Opus) 최종 DECISION: BUY|HOLD|SELL (reports.decision)
+        │       보고서 끝에 `💼 트레이더`·`✅ 최종 결정` + `🗣 토론 전문`·`🗣 리스크 토론 전문`
+        │       (전문 두 개는 대시보드·회고용, 텔레그램엔 안 나감). 실패하면 결정 없이 보고서만 나감
         │
         ├──► storage.py     SQLite + analysis/auto/<주차>/*.md
         └──► notifier.py    텔레그램 2단계 푸시(요약 → 상세)
-                            (auto_hourly = STRONG 또는 1~2년 실적변화 이벤트, SKIP 제외)
+                            (auto_hourly = 최종 결정 매수·매도만, 보유 생략. 결정 없으면
+                             예전 기준 STRONG 또는 1~2년 실적변화 이벤트, SKIP 제외)
                             (auto_event  = 등급 무관 전송 — 급변 원인 자체가 알림 가치)
 ```
 
@@ -101,6 +108,7 @@ synthesizer.py  Claude Opus: 5개 보고 + 토론 판정(Research Manager) + 등
 | `agents.py` | 사업 구조 요약 → 사전 리서치(+후속 라운드) → 5개 서브에이전트 병렬 (`MAX_TURNS_PER_AGENT`, `RESEARCH_*`) |
 | `synthesizer.py` | 종합·등급 판정 (fallback rule 포함) |
 | `debate.py` | 강세/약세 연구원 토론 (TradingAgents Researcher Team) |
+| `trading.py` | 트레이더 → 리스크 토론 → 포트폴리오 매니저 최종 BUY/HOLD/SELL |
 | `retrospect.py` | 주말 회고: 등급 vs 실제 성과 → 역할별 교훈 저장 (reflection) |
 | `lessons.py` | 교훈 메모리 주입·상한 관리 |
 | `pipeline.py` | 전체 오케스트레이션 (`run_once`, `enqueue_hot_picks`) |
@@ -124,6 +132,7 @@ python synthesizer.py 260970    # 위 + 종합 등급
 python notifier.py test         # 텔레그램 봇 핑
 python report_chat.py <id> "질문"  # 보고서 Q&A 단독 테스트
 python debate.py 260970          # 분석가 5명 → 강세/약세 토론까지 (종합·저장 없음)
+python trading.py <보고서.md>     # 저장된 종합 보고서로 트레이더~최종 결정만 (저장·알림 없음)
 python retrospect.py --stats     # 등급별 성과 통계·사례만 (LLM 호출 없음)
 python retrospect.py --lessons   # 쌓인 활성 교훈 목록
 python retrospect.py --no-send   # 회고 지금 1회 (저장만)
@@ -196,7 +205,8 @@ keepalive로 **못 막는** 만료도 있다: Claude Code는 토큰 유효기간
 
 ### 분석 산출물 원칙
 - 한국어. 재무 수치는 백만원 단위 표.
-- **매수/매도/관망 권유 금지** — 객관 데이터와 변동 원인만.
+- 투자 의견(매수/보유/매도)은 리서치 매니저 `📋 투자 계획`, 트레이더, 포트폴리오 매니저만 낸다.
+  분석가 5명은 객관 데이터와 변동 원인만 쓴다(원작의 Analyst Team과 같음). 2026-10-19 이전 '권유 금지' 규칙은 폐기.
 - 분기 손익 비교 시 효율법인세율·일회성 항목 등 회계적 noise는 명시 구분.
 - 종목 코드는 추측 말고 확인.
 

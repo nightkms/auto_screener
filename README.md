@@ -20,6 +20,7 @@ auto_screener/
 ├── agents.py               Claude 5개 서브에이전트 (Agent SDK 병렬)
 ├── synthesizer.py          종합 + 등급 판정 (STRONG/WATCH/INTEREST/SKIP)
 ├── debate.py               강세/약세 연구원 토론 (TradingAgents Researcher Team)
+├── trading.py              트레이더 → 리스크 토론 → 포트폴리오 매니저 최종 BUY/HOLD/SELL
 ├── retrospect.py           주말 회고: 등급 vs 실제 성과 → 역할별 교훈 (reflection)
 ├── lessons.py              교훈 메모리 → 토론·종합에 자동 주입
 ├── notifier.py             텔레그램 푸시
@@ -108,6 +109,7 @@ python data_loader.py 005930    # 삼성전자 DART 정보
 python agents.py 260970         # 에스앤디 5 서브에이전트 분석
 python synthesizer.py 260970    # 위 + 종합 등급
 python debate.py 260970         # 위 + 강세/약세 토론
+python trading.py <보고서.md>    # 저장된 보고서로 트레이더~최종 결정만
 python retrospect.py --stats    # 등급별 이후 성과 통계 (LLM 호출 없음)
 python retrospect.py --lessons  # 쌓인 교훈 목록
 python notifier.py test         # 텔레그램 봇 핑
@@ -185,7 +187,10 @@ agents.py     ◄── Claude Sonnet 4.6 × 5 (병렬, WebSearch 허용)
 debate.py     ◄── 강세/약세 연구원 토론 (Sonnet, 2라운드)
         │
         ▼
-synthesizer.py ◄── Claude Opus 4.7 (토론 판정 + 종합 + 등급, 회고 교훈 주입)
+synthesizer.py ◄── Claude Opus (리서치 매니저: 토론 판정 + 투자 계획 + 등급)
+        │
+        ▼
+trading.py    ◄── 트레이더 → 리스크 토론(공격·보수·중립) → 포트폴리오 매니저(Opus) BUY/HOLD/SELL
         │
         ├──► storage.py (SQLite + analysis/auto/<주차>/*.md)
         └──► notifier.py (텔레그램, STRONG/WATCH만)

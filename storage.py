@@ -58,6 +58,7 @@ CREATE TABLE IF NOT EXISTS reports (
     avg_rating   REAL,
     pick_source  TEXT,                              -- selector 선정근거: search/upper/quant/z-score/manual
     earnings_event TEXT,                            -- 향후 1~2년 실적변화 이벤트 요약(비면 없음). 등급 무관 알림 트리거
+    decision     TEXT,                              -- 포트폴리오 매니저 최종 결정 BUY/HOLD/SELL (없으면 NULL)
     md_path      TEXT,                              -- analysis/auto/YYYY-W##/...
     tokens_in    INTEGER DEFAULT 0,
     tokens_out   INTEGER DEFAULT 0,
@@ -229,6 +230,9 @@ def _migrate(c: sqlite3.Connection) -> None:
     if "earnings_event" not in cols("reports"):
         c.execute("ALTER TABLE reports ADD COLUMN earnings_event TEXT")
         log.info("migrate: reports.earnings_event 추가")
+    if "decision" not in cols("reports"):
+        c.execute("ALTER TABLE reports ADD COLUMN decision TEXT")
+        log.info("migrate: reports.decision 추가")
 
     # ticker_state에 last_run_id FK가 살아있으면 (이전 스키마) 테이블 재생성.
     # 이 테이블은 미러 캐시라 데이터 보존 안 해도 무방.
@@ -329,15 +333,16 @@ def save_report(run_id: int, ticker: str, name: str, grade: str,
                 tokens_out: int, elapsed_s: float,
                 sub_ratings: dict[str, dict],
                 pick_source: str = "",
-                earnings_event: str = "") -> int:
+                earnings_event: str = "",
+                decision: str = "") -> int:
     with _connect() as c:
         cur = c.execute(
             """INSERT INTO reports
                (run_id, ticker, name, grade, avg_rating, pick_source,
-                earnings_event, md_path, tokens_in, tokens_out, elapsed_s)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
+                earnings_event, decision, md_path, tokens_in, tokens_out, elapsed_s)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
             (run_id, ticker, name, grade, avg_rating, pick_source or None,
-             earnings_event or None, md_path,
+             earnings_event or None, decision or None, md_path,
              tokens_in, tokens_out, elapsed_s),
         )
         rid = cur.lastrowid

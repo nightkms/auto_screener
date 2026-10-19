@@ -11,7 +11,8 @@ from __future__ import annotations
 
 import storage
 
-ROLES = ("bull", "bear", "synthesizer")
+# 원작의 메모리 5종: bull / bear / trader / invest_judge(=synthesizer) / risk_manager(=portfolio_manager)
+ROLES = ("bull", "bear", "synthesizer", "trader", "portfolio_manager")
 MAX_ACTIVE_PER_ROLE = 10         # 넘치면 오래된 것부터 비활성 (프롬프트 비대화 방지)
 
 

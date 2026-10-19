@@ -75,6 +75,13 @@ EVENT_HIGH52 = _opt("EVENT_HIGH52", "1").lower() not in ("0", "off", "false")
 # 판정한다. 라운드당 Sonnet 2회. 0이면 토론 생략(경량 모드).
 DEBATE_ROUNDS = int(_opt("DEBATE_ROUNDS", "2"))
 
+# ── 트레이더 → 리스크 토론 → 포트폴리오 매니저 (trading.py) ──────────────────
+# TradingAgents의 Trader / Risk Management Team / Portfolio Manager. 최종 BUY/HOLD/SELL.
+# 리스크 토론은 공격·보수·중립 3명이 RISK_DEBATE_ROUNDS 라운드 발언(라운드당 Sonnet 3회).
+# TRADING_ENABLED=0이면 종합(등급·투자 계획)에서 멈춘다(lite-grade-v1과 같은 흐름).
+TRADING_ENABLED = _opt("TRADING_ENABLED", "1").lower() not in ("0", "off", "false")
+RISK_DEBATE_ROUNDS = int(_opt("RISK_DEBATE_ROUNDS", "1"))
+
 # ── 주말 회고 (retrospect.py) — TradingAgents reflection ────────────────────
 # 과거 보고서의 등급과 이후 실제 수익률을 비교해 역할별(bull/bear/synthesizer) 교훈을
 # lesson 테이블에 쌓고, 다음 분석부터 자동 주입한다. 주말(토·일)에 주차당 1회만,

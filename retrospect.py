@@ -52,13 +52,14 @@ RETRO_MIN_AGE_DAYS = 35          # 1개월 수익률이 확정된 보고서부�
 RETRO_MAX_AGE_DAYS = 200         # 너무 옛 보고서는 프롬프트가 지금과 달라 교훈이 약하다
 SAMPLE_PER_GRADE = 80            # 등급별 표본 상한 (STRONG/WATCH는 보통 전수)
 CASES_PER_SIDE = 6               # 과대평가 의심 / 놓침 의심 사례 수
-CASE_MD_CHARS = 12000            # 사례 보고서 원문 상한 (토론 전문까지 담기게)
+CASE_MD_CHARS = 20000            # 사례 보고서 원문 상한 (트레이더·최종 결정·토론 전문까지)
 RETRO_MAX_TURNS = 40
 RETRO_TIMEOUT_S = 2400
 MAX_ATTEMPTS_PER_WEEK = 3        # 실패 시 다음 정각 재시도 상한
 
 _STATE_KEY = "retrospect_week"   # 값: "<주차>|done" 또는 "<주차>|<시도횟수>"
 _GRADES = ("STRONG", "WATCH", "INTEREST", "SKIP")
+_DECISIONS = ("BUY", "HOLD", "SELL")
 
 _running: asyncio.Task | None = None
 
@@ -75,7 +76,7 @@ def _load_reports() -> list[dict]:
     """윈도우 안 보고서, 종목당 최신 1건. 시장은 candidates에서(대부분 '?'라 빈 값이면 야후가 둘 다 시도)."""
     with storage._connect() as c:
         rows = c.execute(
-            """SELECT r.id, r.ticker, r.name, r.grade, r.avg_rating, r.md_path,
+            """SELECT r.id, r.ticker, r.name, r.grade, r.avg_rating, r.md_path, r.decision,
                       runs.started_at,
                       (SELECT market FROM candidates cd
                         WHERE cd.run_id = r.run_id AND cd.ticker = r.ticker LIMIT 1) AS market
@@ -131,12 +132,12 @@ def _with_performance(rows: list[dict]) -> list[dict]:
 # ---------------------------------------------------------------------------
 # 2) 통계 + 사례
 # ---------------------------------------------------------------------------
-def _stats(rows: list[dict]) -> str:
-    lines = ["| 등급 | 건수 | 1개월 평균 | 1개월 중앙값 | 1개월 상승비율 | 3개월 건수 | 3개월 평균 | 3개월 중앙값 |",
+def _table(rows: list[dict], field: str, keys: tuple[str, ...], label: str) -> str:
+    lines = [f"| {label} | 건수 | 1개월 평균 | 1개월 중앙값 | 1개월 상승비율 | 3개월 건수 | 3개월 평균 | 3개월 중앙값 |",
              "|---|---:|---:|---:|---:|---:|---:|---:|"]
-    for g in _GRADES:
-        m1 = [r["m1"] for r in rows if r["grade"] == g]
-        m3 = [r["m3"] for r in rows if r["grade"] == g and r["m3"] is not None]
+    for g in keys:
+        m1 = [r["m1"] for r in rows if r.get(field) == g]
+        m3 = [r["m3"] for r in rows if r.get(field) == g and r["m3"] is not None]
         if not m1:
             lines.append(f"| {g} | 0 | - | - | - | 0 | - | - |")
             continue
@@ -148,12 +149,24 @@ def _stats(rows: list[dict]) -> str:
     return "\n".join(lines)
 
 
+def _stats(rows: list[dict]) -> str:
+    """등급별 표 + (최종 결정이 있는 보고서가 있으면) BUY/HOLD/SELL별 표."""
+    out = _table(rows, "grade", _GRADES, "등급")
+    if any(r.get("decision") for r in rows):
+        out += "\n\n" + _table(rows, "decision", _DECISIONS, "최종 결정")
+    return out
+
+
 def _pick_cases(rows: list[dict]) -> tuple[list[dict], list[dict]]:
-    """과대평가 의심(STRONG/WATCH 중 최악) / 놓침 의심(INTEREST/SKIP 중 최고). 3개월 있으면 3개월 기준."""
+    """과대평가 의심(STRONG/WATCH 또는 BUY 중 최악) / 놓침 의심(INTEREST/SKIP이면서 BUY가
+    아니거나, SELL 중 최고). 3개월 있으면 3개월 기준."""
     def key(r):
         return r["m3"] if r["m3"] is not None else r["m1"]
-    high = sorted((r for r in rows if r["grade"] in ("STRONG", "WATCH")), key=key)
-    low = sorted((r for r in rows if r["grade"] in ("INTEREST", "SKIP")), key=key, reverse=True)
+    high = sorted((r for r in rows
+                   if r["grade"] in ("STRONG", "WATCH") or r.get("decision") == "BUY"), key=key)
+    low = sorted((r for r in rows
+                  if (r["grade"] in ("INTEREST", "SKIP") and r.get("decision") != "BUY")
+                  or r.get("decision") == "SELL"), key=key, reverse=True)
     return ([r for r in high if key(r) < 0][:CASES_PER_SIDE],
             [r for r in low if key(r) > 0][:CASES_PER_SIDE])
 
@@ -164,7 +177,8 @@ def _case_block(r: dict, kind: str) -> str:
     if len(md) > CASE_MD_CHARS:
         md = md[:CASE_MD_CHARS] + "\n…(이하 생략)"
     m3 = f"{r['m3']:+.1f}%" if r["m3"] is not None else "미도래"
-    return (f"### [{kind}] {r['name']} ({r['ticker']}) — {r['grade']} (평균★ {r['avg_rating']})\n"
+    dec = f" · 최종 결정 {r['decision']}" if r.get("decision") else ""
+    return (f"### [{kind}] {r['name']} ({r['ticker']}) — {r['grade']} (평균★ {r['avg_rating']}){dec}\n"
             f"- 분석일: {r['base_date']} / 이후 수익률: 1개월 {r['m1']:+.1f}% · 3개월 {m3}\n\n"
             f"<보고서 원문>\n{md}\n</보고서 원문>\n")
 
@@ -173,7 +187,7 @@ def build_input(rows: list[dict]) -> str:
     over, missed = _pick_cases(rows)
     parts = [f"# 회고 대상: {_week_label()} (분석일 {RETRO_MIN_AGE_DAYS}~{RETRO_MAX_AGE_DAYS}일 전 보고서, "
              f"종목당 최신 1건, 등급별 최대 {SAMPLE_PER_GRADE}건 표본)", "",
-             "# 등급별 성과 통계 (분석일 종가 대비, 분할 보정)", _stats(rows), "", "# 사례", ""]
+             "# 등급·최종 결정별 성과 통계 (분석일 종가 대비, 분할 보정)", _stats(rows), "", "# 사례", ""]
     parts += [_case_block(r, "과대평가 의심") for r in over]
     parts += [_case_block(r, "놓침 의심") for r in missed]
     if not over and not missed:

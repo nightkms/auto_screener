@@ -1,7 +1,8 @@
 """
 S7: 전체 파이프라인.
 
-selector → data_loader → agents (병렬) → debate(강세/약세) → synthesizer(판정) → storage + notifier.
+selector → data_loader → agents (병렬) → debate(강세/약세) → synthesizer(판정·투자 계획)
+→ trading(트레이더 → 리스크 토론 → 포트폴리오 매니저 BUY/HOLD/SELL) → storage + notifier.
 1회 실행 단위. scheduler.py가 매주 토 08:00에 호출한다.
 
 CLI:
@@ -28,11 +29,13 @@ import selector
 import storage
 import synthesizer
 import ticker_archive
+import trading
 
 log = logging.getLogger("pipeline")
 
-# 보고서 끝에 붙는 토론 전문 섹션 제목. notifier가 이 섹션은 텔레그램에서 뺀다.
+# 보고서 끝에 붙는 토론 전문 섹션 제목. notifier가 "토론 전문"이 든 섹션은 텔레그램에서 뺀다.
 DEBATE_SECTION = "## 🗣 토론 전문"
+RISK_DEBATE_SECTION = "## 🗣 리스크 토론 전문"
 
 
 def _week_label(d: date | None = None) -> str:
@@ -67,10 +70,36 @@ async def _debate_and_synthesize(run_id: int, cand: selector.Candidate,
                                           debate_text=transcript)
     storage.log_usage(run_id, config.CLAUDE_SYNTH_MODEL,
                       report.tokens_in, report.tokens_out, f"synth:{cand.ticker}")
-    if report.ok and transcript:
-        report.markdown = report.markdown.rstrip() + f"\n\n{DEBATE_SECTION}\n{transcript}\n"
     report.tokens_in += deb.tokens_in
     report.tokens_out += deb.tokens_out
+    if not report.ok:
+        return report
+
+    # 트레이더 → 리스크 토론 → 포트폴리오 매니저 (최종 BUY/HOLD/SELL). 실패해도 보고서는 나간다.
+    tail: list[str] = []
+    if config.TRADING_ENABLED:
+        tr = await trading.run(cand, analysis, report.markdown, transcript)
+        for model, (t_in, t_out), tag in (
+                (config.CLAUDE_SUB_MODEL, tr.sub_tokens, "trading"),
+                (config.CLAUDE_SYNTH_MODEL, tr.pm_tokens, "pm")):
+            if t_in or t_out:
+                storage.log_usage(run_id, model, t_in, t_out, f"{tag}:{cand.ticker}")
+                report.tokens_in += t_in
+                report.tokens_out += t_out
+        report.decision = tr.decision
+        if tr.trader_text:
+            tail.append(f"## 💼 트레이더 거래 제안\n{tr.trader_text}")
+        if tr.pm_text:
+            tail.append(tr.pm_text if tr.pm_text.lstrip().startswith("## ✅")
+                        else f"## ✅ 최종 결정\n{tr.pm_text}")
+        if transcript:
+            tail.append(f"{DEBATE_SECTION}\n{transcript}")
+        if tr.risk_turns:
+            tail.append(f"{RISK_DEBATE_SECTION}\n{tr.risk_transcript()}")
+    elif transcript:
+        tail.append(f"{DEBATE_SECTION}\n{transcript}")
+    if tail:
+        report.markdown = report.markdown.rstrip() + "\n\n" + "\n\n".join(tail) + "\n"
     return report
 
 
@@ -162,6 +191,7 @@ async def run_once(top_n: int = config.TOP_N,
                     sub_ratings=sub_info,
                     pick_source=c.source_tag,
                     earnings_event=report.earnings_event,
+                    decision=report.decision,
                 )
                 # 종목별 폴더에 보고서 사본 + 메타(등급·요약) 갱신.
                 # 원자료(공시/뉴스)는 누적 안 함 (매번 새로 받음).
@@ -347,6 +377,7 @@ async def run_for_ticker(ticker: str, name: str = "",
             sub_ratings=sub_info,
             pick_source=cand.source_tag,
             earnings_event=report.earnings_event,
+            decision=report.decision,
         )
         # 종목별 폴더에 보고서 사본 + 메타(등급·요약) 갱신.
         # 원자료(공시/뉴스)는 누적 안 함 (매번 새로 받음).

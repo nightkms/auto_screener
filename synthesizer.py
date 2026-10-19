@@ -77,6 +77,7 @@ class FinalReport:
     tokens_out: int = 0
     elapsed_s: float = 0.0
     ok: bool = True           # False면 종합 실패(한도초과 등) → 저장 금지·큐 재시도
+    decision: str = ""        # 포트폴리오 매니저 최종 BUY/HOLD/SELL (trading.py가 채움, 없으면 "")
 
 
 # ---------------------------------------------------------------------------

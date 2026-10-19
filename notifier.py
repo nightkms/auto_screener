@@ -163,6 +163,8 @@ _BRIEF_SECTIONS = ("한 줄 요약", "영역별 매트릭스")
 # 텔레그램에 안 내보내는 섹션. 토론 전문은 길어서(라운드당 2천 자 안팎) 대시보드·회고용으로만 둔다
 # — 요지는 종합의 `⚖️ 강세·약세 토론 판정` 섹션이 2차 상세로 전한다.
 _SKIP_SECTIONS = ("토론 전문",)
+# 포트폴리오 매니저 최종 결정은 3차 메시지로 따로 보낸다(2차 상세에서 제외).
+_DECISION_SECTION = "최종 결정"
 
 # 매트릭스 영역명 축약 (부분 문자열 매칭)
 _AREA_SHORT = {
@@ -304,6 +306,8 @@ def summarize_detail(md: str, max_len: int = SUMMARY_MAX) -> str:
             continue                      # 1차와 중복
         if any(_norm(k) in _norm(title) for k in _SKIP_SECTIONS):
             continue
+        if _norm(_DECISION_SECTION) in _norm(title):
+            continue                      # 3차 메시지
         body = _drop_tokens(body)
         if not body:
             continue                      # 토큰만 있던 섹션(실적변화 이벤트 판정 등)
@@ -404,9 +408,10 @@ def build_single_messages(report_id: int,
 
     알림 정책 (source별):
     - 'manual' / 'telegram': 등급 무관 무조건 전송 (사용자가 직접 지정한 종목)
-    - 'auto_weekly' / 'auto_hourly': grade=='STRONG' **또는** 향후 1~2년 실적변화
-      이벤트(earnings_event)가 잡힌 종목이면 전송.
-      단 **SKIP 등급은 이벤트가 있어도 제외** (볼 가치 낮음).
+    - 'auto_weekly' / 'auto_hourly': 포트폴리오 매니저 **최종 결정이 매수·매도**면 전송,
+      보유(HOLD)는 생략 (2026-10-19, TradingAgents 완전판 전환 — 등급 기준에서 변경).
+      최종 결정이 없으면(트레이딩 단계 실패·TRADING_ENABLED=0) 예전 등급 기준으로 폴백:
+      grade=='STRONG' 또는 실적변화 이벤트(earnings_event)가 있으면 전송, SKIP은 제외.
     - 'auto_event' (급변 재분석): 등급 무관 전송. 애초에 "오늘 왜 튀었는지"를
       알려고 부른 종목이라 등급이 낮아도 그 답 자체가 알림 가치다. SKIP도 보낸다 —
       급변한 종목이 SKIP이면 '올랐지만 살 이유는 없다'가 곧 알고 싶던 결론이다.
@@ -420,7 +425,13 @@ def build_single_messages(report_id: int,
     r = dict(row)
     # DB에 저장된 이벤트 노트엔 마크다운 잔재(백틱 등)가 섞여 있을 수 있다
     event_note = _clean((r.get("earnings_event") or "").strip(), 140)
-    if source in ("auto_weekly", "auto_hourly"):
+    decision = (r.get("decision") or "").upper()
+    if source in ("auto_weekly", "auto_hourly") and decision:
+        if decision not in ("BUY", "SELL"):
+            log.info("[skip alert] report=%d %s decision=%s (%s는 매수·매도만 알림)",
+                     report_id, r.get("ticker"), decision, source)
+            return []
+    elif source in ("auto_weekly", "auto_hourly"):
         grade = r.get("grade")
         if grade == "SKIP":
             log.info("[skip alert] report=%d %s grade=SKIP (%s는 SKIP 제외)",
@@ -451,6 +462,10 @@ def build_single_messages(report_id: int,
     # 1차 — 요약
     head = [f"{title} — {src_tag}",
             f"등급 {r['grade']} · 평균 ★ {r['avg_rating']}"]
+    # 포트폴리오 매니저 최종 결정(trading.py). 근거는 2차 상세의 `✅ 최종 결정` 섹션.
+    if decision:
+        ko = {"BUY": "🟢 매수", "HOLD": "🟡 보유", "SELL": "🔴 매도"}.get(decision, decision)
+        head.append(f"최종 결정: {ko} ({decision})")
     if trigger_note:
         head.append(f"⚡ 감지: {trigger_note}")
     # 분석이 실패해 섹션 없는 에러 문구만 남은 보고서도 있다 → 원문 앞부분으로 폴백
@@ -460,8 +475,12 @@ def build_single_messages(report_id: int,
     if detail_body or event_note:
         head.append("▼ 상세는 바로 다음 메시지 (필요 없으면 넘기세요)")
     brief = "\n".join(head) + f"\n{'─' * 30}\n{brief_body}"
+    # 3차 — 포트폴리오 매니저 최종 결정 (있을 때만)
+    final_body = _drop_tokens(_sec(_sections(md), _DECISION_SECTION)) if md else ""
+    final = (f"{title} · 최종 결정\n{'─' * 30}\n{_strip_markdown(final_body)}"
+             if final_body else "")
     if not (detail_body or event_note):
-        return [brief]
+        return [brief] + ([final] if final else [])
 
     # 2차 — 상세 (실적변화 이벤트는 여기 머리에)
     tail = [f"{title} · 상세"]
@@ -472,7 +491,7 @@ def build_single_messages(report_id: int,
     if re.search(r"레버리지\s*[A-D]\b", detail_body + " " + event_note):
         tail.append(EVENT_LEGEND)
     detail = "\n".join(tail) + (f"\n{'─' * 30}\n{detail_body}" if detail_body else "")
-    return [brief, detail]
+    return [brief, detail] + ([final] if final else [])
 
 
 def _queue_footer() -> str:
