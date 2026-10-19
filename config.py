@@ -78,7 +78,7 @@ DEBATE_ROUNDS = int(_opt("DEBATE_ROUNDS", "2"))
 # ── 트레이더 → 리스크 토론 → 포트폴리오 매니저 (trading.py) ──────────────────
 # TradingAgents의 Trader / Risk Management Team / Portfolio Manager. 최종 BUY/HOLD/SELL.
 # 리스크 토론은 공격·보수·중립 3명이 RISK_DEBATE_ROUNDS 라운드 발언(라운드당 Sonnet 3회).
-# TRADING_ENABLED=0이면 종합(등급·투자 계획)에서 멈춘다(lite-grade-v1과 같은 흐름).
+# TRADING_ENABLED=0이면 종합(등급·투자 계획)에서 멈춘다(2026-10-19 이전 경량 흐름).
 TRADING_ENABLED = _opt("TRADING_ENABLED", "1").lower() not in ("0", "off", "false")
 RISK_DEBATE_ROUNDS = int(_opt("RISK_DEBATE_ROUNDS", "1"))
 
