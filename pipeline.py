@@ -140,7 +140,8 @@ async def run_once(top_n: int = config.TOP_N,
                 prior = ticker_archive.read_last_summary(c.ticker, c.name)
             prior_summaries[c.ticker] = prior
             try:
-                ctx = data_loader.load_context(c.ticker)
+                # 동기 requests 다발(수 초) → 스레드로. 루프를 막으면 대시보드가 멈춘다.
+                ctx = await asyncio.to_thread(data_loader.load_context, c.ticker)
                 if ctx:
                     contexts[c.ticker] = ctx
             except Exception as e:
@@ -329,7 +330,8 @@ async def run_for_ticker(ticker: str, name: str = "",
                          ticker, len(prior_summary))
 
         try:
-            ctx = data_loader.load_context(ticker)
+            # 동기 requests 다발(수 초) → 스레드로. 루프를 막으면 대시보드가 멈춘다.
+            ctx = await asyncio.to_thread(data_loader.load_context, ticker)
         except Exception as e:
             log.warning("[%s] DART 실패: %s", ticker, e)
             ctx = None

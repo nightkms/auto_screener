@@ -85,6 +85,9 @@ def _enrich_report(r: dict) -> dict:
 
 # ---------------------------------------------------------------------------
 # 라우트
+#  큐 워커(분석)와 같은 이벤트 루프를 쓰므로, await가 없는 라우트(SQLite·템플릿·파일만)는
+#  sync def로 둔다 → FastAPI가 스레드풀에서 돌려 분석 중에도 화면이 바로 응답한다.
+#  storage._connect()는 호출마다 새 연결이라 스레드에서 써도 안전.
 # ---------------------------------------------------------------------------
 def _build_dashboard_context(request: Request) -> dict[str, Any]:
     """index와 부분 갱신(/api/dashboard)이 공유하는 동적 데이터 컨텍스트.
@@ -152,7 +155,7 @@ def _build_dashboard_context(request: Request) -> dict[str, Any]:
 
 
 @app.get("/", response_class=HTMLResponse)
-async def index(request: Request):
+def index(request: Request):
     storage.init_db()
     ctx = _build_dashboard_context(request)
     ctx.update({
@@ -169,12 +172,11 @@ async def index(request: Request):
 
 
 @app.get("/api/dashboard")
-async def api_dashboard(request: Request) -> JSONResponse:
+def api_dashboard(request: Request) -> JSONResponse:
     """대시보드 동적 영역의 부분 HTML을 JSON으로 반환 (AJAX 폴링용).
 
     index.html과 동일한 partial을 서버에서 렌더해 내려주므로 마크업이
     중복되지 않는다. JS는 받은 HTML로 각 컨테이너 innerHTML만 교체한다."""
-    storage.init_db()
     ctx = _build_dashboard_context(request)
     env = templates.env
     return JSONResponse({
@@ -198,7 +200,6 @@ def _queue_json(request: Request, toast: str = "",
                 toast_type: str = "success") -> JSONResponse:
     """큐 패널 partial을 다시 렌더해 토스트와 함께 JSON으로 반환. 폼 AJAX 공통 응답.
     프런트는 이걸 받아 #dash-queue innerHTML만 교체하고 showToast를 띄운다."""
-    storage.init_db()
     ctx = _build_dashboard_context(request)
     return JSONResponse({
         "queue": templates.env.get_template("_dash_queue.html").render(ctx),
@@ -210,13 +211,13 @@ def _queue_json(request: Request, toast: str = "",
 
 
 @app.get("/api/search")
-async def api_search(q: str = "") -> list[dict]:
+def api_search(q: str = "") -> list[dict]:
     """종목 검색 (자동완성용). 종목명 또는 6자리 코드로 부분 일치."""
     return data_loader.search_stocks(q, limit=20)
 
 
 @app.post("/queue/add")
-async def queue_add(request: Request, ticker: str = Form(...),
+def queue_add(request: Request, ticker: str = Form(...),
                     name: str = Form("")):
     ticker = ticker.strip()
     if not (ticker.isdigit() and len(ticker) == 6):
@@ -236,7 +237,7 @@ async def queue_add(request: Request, ticker: str = Form(...),
 
 
 @app.post("/queue/pause")
-async def queue_pause(request: Request):
+def queue_pause(request: Request):
     """큐 분석 일시정지. 처리 중인 종목은 끝까지 두고, 다음 종목부터 멈춤.
     영속 상태라 재시작해도 유지 → 재기동 후 명시적 재개 전까지 분석 안 함."""
     storage.set_queue_paused(True)
@@ -249,7 +250,7 @@ async def queue_pause(request: Request):
 
 
 @app.post("/queue/resume")
-async def queue_resume(request: Request):
+def queue_resume(request: Request):
     """큐 분석 재개."""
     storage.set_queue_paused(False)
     log.info("큐 재개 요청됨")
@@ -260,7 +261,7 @@ async def queue_resume(request: Request):
 
 
 @app.post("/queue/{qid}/delete")
-async def queue_delete(qid: int, request: Request):
+def queue_delete(qid: int, request: Request):
     storage.remove_queue_item(qid)
     if _wants_json(request):
         return _queue_json(request, "✓ 큐에서 삭제됨", "success")
@@ -268,7 +269,7 @@ async def queue_delete(qid: int, request: Request):
 
 
 @app.post("/report/{report_id}/delete")
-async def report_delete(report_id: int, request: Request):
+def report_delete(report_id: int, request: Request):
     """보고서 카스케이드 삭제. 별점 0 부실 보고서가 분석 목록에 남아
     selector dedup(`recently_analyzed_tickers`)에 걸려 자동 재분석이
     안 되는 케이스를 사용자가 직접 청소할 수 있게 함."""
@@ -282,7 +283,7 @@ async def report_delete(report_id: int, request: Request):
 
 
 @app.get("/ticker/{ticker}", response_class=HTMLResponse)
-async def ticker_history(request: Request, ticker: str):
+def ticker_history(request: Request, ticker: str):
     """동일 종목의 보고서 이력 — 등급/★/서브 별점이 어떻게 변했는지 추적."""
     ticker = ticker.strip()
     if not (ticker.isdigit() and len(ticker) == 6):
@@ -351,7 +352,7 @@ def ticker_performance(ticker: str, report_id: int) -> JSONResponse:
 
 
 @app.get("/report/{report_id}", response_class=HTMLResponse)
-async def report_view(request: Request, report_id: int):
+def report_view(request: Request, report_id: int):
     with storage._connect() as c:
         row = c.execute(
             "SELECT * FROM reports WHERE id=?", (report_id,)
@@ -382,7 +383,7 @@ async def report_view(request: Request, report_id: int):
 
 
 @app.get("/report/{report_id}/qa")
-async def report_qa_list(report_id: int) -> JSONResponse:
+def report_qa_list(report_id: int) -> JSONResponse:
     """이 보고서의 Q&A 이력을 JSON으로. UI 리프레시·디버깅용."""
     with storage._connect() as c:
         exists = c.execute("SELECT 1 FROM reports WHERE id=?", (report_id,)).fetchone()
