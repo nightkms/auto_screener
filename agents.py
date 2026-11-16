@@ -274,8 +274,19 @@ def _build_user_prompt(name: str, ticker: str, candidate: selector.Candidate,
                 lines.append(f"- {p.get('name')} ({p.get('ticker')}): "
                              f"등락 {p.get('fluctuation_pct')}%, 시총 {p.get('market_cap_munit')}")
             lines.append("")
+        rf = ctx.report_financials
+        if rf and rf.get("summary"):
+            lines.append(f"## 최신 정기보고서 재무제표 (DART {rf.get('report_nm','')} 원문 "
+                         f"'III. 재무에 관한 사항' 요약, 접수 {rf.get('rcept_dt','')}, "
+                         f"rcept_no={rf.get('rcept_no','')})")
+            lines.append(f"출처: {data_loader.dart_viewer_url(rf.get('rcept_no',''))}")
+            # 요약의 '#' 제목이 컨텍스트 블록(##)과 겹치지 않게 한 단계 아래로
+            lines.append(re.sub(r"(?m)^#{1,3}\s", "#### ", rf["summary"]))
+            lines.append("_위 표는 공시 원문에서 뽑은 확정 수치다. 아래 '재무(API)' 표와 다르거나 거기 없는 "
+                         "항목(분기 3개월 순이익·금융손익·현금흐름)은 이 원문을 우선하고, '미확인'으로 두지 말 것._")
+            lines.append("")
         if ctx.financials:
-            lines.append("## 재무 (백만원, 최신 보고서 우선)")
+            lines.append("## 재무 (API 주요계정, 백만원, 최신 보고서 우선)")
             for period, accs in ctx.financials.items():
                 row = ", ".join(
                     f"{k} {v/1e6:,.0f}" for k, v in accs.items()
@@ -608,7 +619,8 @@ async def enrich_business_overview(ctx: data_loader.StockContext) -> bool:
     if not latest:
         return False
 
-    body = await asyncio.to_thread(data_loader.fetch_business_section, latest["rcept_no"])
+    body = await asyncio.to_thread(data_loader.fetch_business_section, latest["rcept_no"],
+                                   ctx.ticker, ctx.name)
     summary = ""
     if body:
         opts = ClaudeAgentOptions(
@@ -647,6 +659,78 @@ async def enrich_business_overview(ctx: data_loader.StockContext) -> bool:
     return True
 
 
+_FINANCIAL_SUMMARY_SYSTEM = (
+    "너는 한국 DART 정기보고서의 'III. 재무에 관한 사항'(요약재무정보·재무제표 본표)을 분석가용으로 "
+    "압축하는 도구다. 원문 숫자만 쓰고 금액은 백만원 단위로 환산(반올림)한다. 계산한 값은 '(계산)'으로 표시.\n"
+    "연결재무제표가 있으면 연결 기준, 없으면 별도 기준으로 쓰고 어느 기준인지 첫 줄에 밝힌다.\n"
+    "출력 형식(마크다운):\n"
+    "1. 손익 표 — 행: 매출액, 매출총이익, 영업이익, 금융수익, 금융비용, 지분법손익, 법인세차감전순이익, "
+    "법인세비용, 계속영업이익, 중단영업손익, 당기(분기)순이익, 지배주주 순이익. "
+    "열: 당기 3개월 | 당기 누적 | 전년동기 3개월 | 전년동기 누적 (사업보고서면 당기 | 전기). "
+    "영업이익률·순이익률(당기 3개월·누적)을 표 아래 한 줄로.\n"
+    "2. 재무상태 — 현금성자산, 매출채권, 재고자산, 총차입금(단기·유동성장기·장기차입금·전환사채·리스 합계, 계산), "
+    "파생상품부채, 부채총계, 자본총계, 부채비율 — 당기말 vs 전기말 표.\n"
+    "3. 현금흐름(누적) — 영업·투자·재무활동 현금흐름과 운전자본 조정·이자 지급 등 큰 항목, 전년동기 대비.\n"
+    "4. 회계적 noise 구분 — 영업이익과 순이익의 괴리 원인(금융수익·비용 중 파생상품·전환사채 평가/처분손익, "
+    "지분법, 중단영업, 법인세 수익 등 일회성/비현금 항목)을 원문에 있는 범위에서 2~4줄. "
+    "'3개월'과 '누적'의 방향이 다르면(예: 누적 흑자인데 3개월 적자) 반드시 짚는다.\n"
+    "규칙: 원문에 없는 숫자는 쓰지 않는다(지어내지 말 것). 추측·전망·매수/매도 의견 금지. 한국어."
+)
+
+
+async def enrich_financial_statements(ctx: data_loader.StockContext) -> bool:
+    """최신 정기보고서 원문 'III. 재무에 관한 사항'을 요약해 ctx.report_financials에 채운다.
+    fnlttSinglAcnt(주요계정 몇 개)로는 분기 3개월 순이익·금융손익·현금흐름이 안 보이므로 원문을 쓴다.
+    rcept_no 단위 캐시(report_financials.json). 반환: 새로 요약했으면 True."""
+    cached = ticker_archive.read_report_financials(ctx.ticker, ctx.name)
+    latest = await asyncio.to_thread(data_loader.latest_periodic_report, ctx.corp_code)
+    if cached.get("summary") and (not latest or cached.get("rcept_no") == latest["rcept_no"]):
+        ctx.report_financials = cached
+        return False
+    if not latest:
+        return False
+
+    body = await asyncio.to_thread(data_loader.fetch_financial_section, latest["rcept_no"],
+                                   ctx.ticker, ctx.name)
+    summary = ""
+    if body:
+        opts = ClaudeAgentOptions(
+            system_prompt=_FINANCIAL_SUMMARY_SYSTEM,
+            model=config.CLAUDE_SUB_MODEL,
+            permission_mode="bypassPermissions",
+            allowed_tools=[],
+            max_turns=1,
+            env=config.sdk_env(),
+        )
+        prompt = (f"회사: {ctx.name} ({ctx.ticker})\n"
+                  f"보고서: {latest['report_nm']} (접수 {latest['rcept_dt']}, rcept_no={latest['rcept_no']})\n\n"
+                  f"[III. 재무에 관한 사항 원문 — 요약재무정보·재무제표 본표]\n{body}\n\n"
+                  "위 원문을 규칙에 맞게 요약하라.")
+        pieces: list[str] = []
+
+        async def _consume() -> None:
+            async for msg in query(prompt=prompt, options=opts):
+                if isinstance(msg, AssistantMessage):
+                    for block in msg.content:
+                        if isinstance(block, TextBlock):
+                            pieces.append(block.text)
+
+        try:
+            await asyncio.wait_for(_consume(), timeout=BUSINESS_SUMMARY_TIMEOUT_S)
+            summary = "\n".join(pieces).strip()
+        except Exception as e:
+            log.warning("[%s] 정기보고서 재무 요약 실패: %s", ctx.ticker, e)
+
+    if not summary:
+        if cached.get("summary"):
+            ctx.report_financials = cached   # 직전 보고서 요약이라도 없는 것보단 낫다
+        return False
+    fin = {**latest, "summary": summary}
+    ticker_archive.save_report_financials(ctx.ticker, ctx.name, fin)
+    ctx.report_financials = fin
+    return True
+
+
 async def analyze_stock(candidate: selector.Candidate,
                         ctx: data_loader.StockContext | None,
                         prior_summary: str = "") -> StockAnalysis:
@@ -671,6 +755,13 @@ async def analyze_stock(candidate: selector.Candidate,
                          ctx.business_overview.get("report_nm"))
         except Exception as e:
             log.warning("[%s] 사업의 내용 요약 실패: %s", candidate.ticker, e)
+        # 같은 정기보고서 원문(저장본 재사용)의 재무제표 본표 요약 — 분기 3개월 손익·현금흐름.
+        try:
+            if await enrich_financial_statements(ctx):
+                log.info("[%s] 정기보고서 재무 요약 갱신 (%s)", candidate.ticker,
+                         ctx.report_financials.get("report_nm"))
+        except Exception as e:
+            log.warning("[%s] 정기보고서 재무 요약 실패: %s", candidate.ticker, e)
     user_prompt = _build_user_prompt(
         name, candidate.ticker, candidate, ctx,
         prior_summary=prior_summary,

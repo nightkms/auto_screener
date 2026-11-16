@@ -188,6 +188,24 @@ def save_business_overview(ticker: str, name: str, overview: dict) -> None:
         json.dumps(overview, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
+def read_report_financials(ticker: str, name: str = "") -> dict:
+    """정기보고서 'III. 재무에 관한 사항' 요약 캐시. 구조·재사용 규칙은 business_overview와 같다."""
+    p = ticker_dir(ticker, name) / "report_financials.json"
+    if not p.exists():
+        return {}
+    try:
+        return json.loads(p.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+
+
+def save_report_financials(ticker: str, name: str, fin: dict) -> None:
+    if not fin.get("summary"):
+        return
+    (ticker_dir(ticker, name) / "report_financials.json").write_text(
+        json.dumps(fin, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
 def save_research_brief(ticker: str, name: str, text: str) -> Path:
     """사전 리서치 브리프(출처 포함)를 회차별로 보존. 출처 추적용 — 보고서 표면엔 요약만 남아도
     어떤 검색 근거로 판단했는지 사후에 되짚을 수 있어야 한다."""

@@ -63,7 +63,8 @@ selector.py     검색상위 → 상한가·거래량 급증 → 부족분 시�
 data_loader.py  DART OpenAPI: 회사·재무·최근 공시 + 네이버 시세
         │
         ▼
-agents.py       ① 사업 구조: 정기보고서 'II. 사업의 내용' 요약(매출처·고객 집중도, rcept_no 캐시)
+agents.py       ① 정기보고서: DART 웹 PDF(실패 시 OpenAPI)를 dart_reports/<rcept_no>.pdf·txt로 1회 다운로드 →
+        │          'II. 사업의 내용' 요약(매출처·고객 집중도) + 'III. 재무' 본표 요약(분기 3개월 손익·현금흐름, rcept_no 캐시)
         │       ② 사전 리서치: 수석 리서처 1명(prompts/research.txt)이 WebSearch 20회+ 로 브리프 작성,
         │          얕거나 '확인 안 됨'이 남으면 같은 세션 resume으로 후속 라운드(최대 3)
         │       ③ Claude Sonnet × 5 병렬 (valuation/industry/price_flow/catalyst/risk)
@@ -105,7 +106,7 @@ trading.py      트레이더(Sonnet) 거래 제안 → 리스크 토론(공격·
 | `selector.py` | hot pick 선정 (3단계, [정책](docs/design/selector.md)) |
 | `event_watch.py` | 이벤트 재분석 트리거. 최근 분석 종목 중 오늘 급변한 종목을 30일 dedup 무시하고 재투입 |
 | `data_loader.py` | DART/네이버 수집, 분석 컨텍스트 패킹 |
-| `agents.py` | 사업 구조 요약 → 사전 리서치(+후속 라운드) → 5개 서브에이전트 병렬 (`MAX_TURNS_PER_AGENT`, `RESEARCH_*`) |
+| `agents.py` | 정기보고서 원문(사업의 내용·재무 본표) 요약 → 사전 리서치(+후속 라운드) → 5개 서브에이전트 병렬 (`MAX_TURNS_PER_AGENT`, `RESEARCH_*`) |
 | `synthesizer.py` | 종합·등급 판정 (fallback rule 포함) |
 | `debate.py` | 강세/약세 연구원 토론 (TradingAgents Researcher Team) |
 | `trading.py` | 트레이더 → 리스크 토론 → 포트폴리오 매니저 최종 BUY/HOLD/SELL |

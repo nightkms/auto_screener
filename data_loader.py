@@ -97,6 +97,8 @@ class StockContext:
     # 정기보고서 '사업의 내용' 요약. agents.enrich_business_overview가 채운다.
     # {'rcept_no','report_nm','rcept_dt','summary'}
     business_overview: dict | None = None
+    # 정기보고서 'III. 재무에 관한 사항' 원문 요약. agents.enrich_financial_statements가 채운다.
+    report_financials: dict | None = None
 
     def to_dict(self) -> dict:
         return {
@@ -109,6 +111,7 @@ class StockContext:
             "peers": self.peers, "short_sale": self.short_sale,
             "preferred_info": self.preferred_info,
             "business_overview": self.business_overview,
+            "report_financials": self.report_financials,
         }
 
 
@@ -309,10 +312,11 @@ def _fetch_financials_all(corp_code: str, years: int = 2) -> dict[str, dict[str,
     """
     out: dict[str, dict[str, float]] = {}
     today_year = date.today().year
-    # 최신부터: 올해 1Q / 작년 연간 / 작년 3Q / 작년 반기 / 작년 1Q / 재작년 연간 ...
+    # 최신부터: 올해 연간/3Q/반기/1Q → 작년 연간/3Q/... (없는 건 건너뜀)
+    # 예전엔 같은 해 안에서 1Q부터 조회해 3Q가 나온 뒤에도 '최신 비율'이 1Q로 계산됐다(2026-11-16).
     candidates: list[tuple[int, str]] = []
     for y in range(today_year, today_year - years - 1, -1):
-        for code in ("11013", "11012", "11014", "11011"):  # 분기 우선
+        for code in ("11011", "11014", "11012", "11013"):  # 같은 해 안에서도 최신 보고서 우선
             candidates.append((y, code))
     for y, code in candidates:
         fin = _fetch_financials_one(corp_code, y, code)
@@ -583,30 +587,115 @@ def latest_periodic_report(corp_code: str) -> dict | None:
     return None
 
 
-def fetch_business_section(rcept_no: str, max_chars: int = 30000) -> str | None:
-    """정기보고서 원문에서 'II. 사업의 내용' 구간만 평문으로 잘라 반환.
-    정기보고서 ZIP에는 감사보고서 등 첨부 XML이 같이 들어 있으므로 본문 '{rcept_no}.xml'을 고른다.
-    목차가 본문 앞에 반복될 수 있어 시작 후보 중 가장 긴 구간을 택한다."""
+def dart_viewer_url(rcept_no: str) -> str:
+    """DART 공시 뷰어 주소 (출처 표기용)."""
+    return f"https://dart.fss.or.kr/dsaf001/main.do?rcpNo={rcept_no}"
+
+
+def download_periodic_report(rcept_no: str, ticker: str, name: str) -> str | None:
+    """정기보고서를 받아 평문으로 저장하고 반환.
+    1순위: DART 웹사이트 '다운로드' 버튼과 같은 PDF (`_download_pdf_from_dart_web`).
+           당일 접수분은 OpenAPI 원문이 늦게 올라와 '014 파일이 존재하지 않습니다'가 나지만
+           웹사이트 PDF는 접수 직후부터 받아진다(2026-11-16 에스앤디). PDF 원본도 같이 보관한다.
+    2순위: OpenAPI document.xml(ZIP 안 본문 '{rcept_no}.xml' — 감사보고서 등 첨부 XML 제외).
+    저장: analysis/by_ticker/<ticker>_<name>/dart_reports/<rcept_no>.pdf / .txt — 접수번호는 불변이므로
+    .txt가 있으면 다시 받지 않는다(사업의 내용·재무 구간이 같은 파일을 공유)."""
+    import ticker_archive  # 지연 import (data_loader ↔ ticker_archive 순환 방지)
+    folder = ticker_archive.ticker_dir(ticker, name) / "dart_reports"
+    path = folder / f"{rcept_no}.txt"
+    if path.exists() and path.stat().st_size > 0:
+        return path.read_text(encoding="utf-8")
+    folder.mkdir(parents=True, exist_ok=True)
+    text, src = _download_pdf_from_dart_web(rcept_no, folder / f"{rcept_no}.pdf"), "웹 PDF"
+    if not text:
+        text, src = _download_openapi_document(rcept_no), "OpenAPI"
+    if not text:
+        log.warning("정기보고서 원문 fetch 실패 rcept=%s (웹 PDF·OpenAPI 모두)", rcept_no)
+        return None
+    try:
+        path.write_text(text, encoding="utf-8")
+        log.info("[%s] 정기보고서 원문 저장 %s (%s, %d자)", ticker, path.name, src, len(text))
+    except Exception as e:
+        log.warning("[%s] 정기보고서 원문 저장 실패: %s", ticker, e)
+    return text
+
+
+_DART_WEB = "https://dart.fss.or.kr"
+_WEB_HEADERS = {"User-Agent": "Mozilla/5.0"}
+_WEB_DCM_NO = re.compile(r"openPdfDownload\('\d+',\s*'(\d+)'\)|dcmNo'\]\s*=\s*\"(\d+)\"")
+_PDF_PAGE_FOOTER = re.compile(r"(?m)^\s*전자공시시스템 dart\.fss\.or\.kr\s+Page \d+\s*$")
+
+
+def _download_pdf_from_dart_web(rcept_no: str, pdf_path: Path) -> str | None:
+    """DART 웹사이트에서 사람이 '다운로드 → PDF'를 누르는 것과 같은 순서로 PDF를 받아 텍스트 추출.
+    뷰어(main.do)에서 dcm_no를 얻고, 다운로드 창(pdf/download/main.do)을 먼저 열어 세션 쿠키를
+    받은 뒤 pdf.do를 부른다(쿠키 없이 부르면 200 + 빈 본문). 비공식 경로라 실패하면 None."""
+    try:
+        from pypdf import PdfReader
+    except ImportError:
+        log.warning("pypdf 미설치 → 웹 PDF 생략 (pip install -r requirements.txt)")
+        return None
+    try:
+        with requests.Session() as s:
+            s.headers.update(_WEB_HEADERS)
+            r = s.get(f"{_DART_WEB}/dsaf001/main.do", params={"rcpNo": rcept_no}, timeout=20)
+            r.raise_for_status()
+            m = _WEB_DCM_NO.search(r.text)
+            if not m:
+                log.warning("DART 웹 dcm_no 파싱 실패 rcept=%s", rcept_no)
+                return None
+            dcm_no = m.group(1) or m.group(2)
+            dl_page = f"{_DART_WEB}/pdf/download/main.do?rcp_no={rcept_no}&dcm_no={dcm_no}"
+            s.get(dl_page, timeout=20).raise_for_status()
+            p = s.get(f"{_DART_WEB}/pdf/download/pdf.do",
+                      params={"rcp_no": rcept_no, "dcm_no": dcm_no},
+                      headers={"Referer": dl_page}, timeout=120)
+            p.raise_for_status()
+        if not p.content.startswith(b"%PDF"):
+            log.warning("DART 웹 PDF 응답이 PDF가 아님 rcept=%s (%d바이트)", rcept_no, len(p.content))
+            return None
+        pdf_path.write_bytes(p.content)
+        reader = PdfReader(io.BytesIO(p.content))
+        text = "\n".join((pg.extract_text() or "") for pg in reader.pages)
+    except Exception as e:
+        log.warning("DART 웹 PDF 다운로드/추출 실패 rcept=%s: %s", rcept_no, e)
+        return None
+    text = _PDF_PAGE_FOOTER.sub("", text).strip()
+    log.info("DART 웹 PDF 수집 rcept=%s: %d쪽, %.1fMB, %d자", rcept_no, len(reader.pages),
+             len(p.content) / 1e6, len(text))
+    return text or None
+
+
+def _download_openapi_document(rcept_no: str) -> str | None:
+    """OpenAPI document.xml(ZIP) → 본문 XML 평문. 없거나(014 등) 실패하면 None."""
     try:
         r = requests.get(f"{DART_BASE}/document.xml",
-                         params={"crtfc_key": config.DART_API_KEY,
-                                 "rcept_no": rcept_no},
+                         params={"crtfc_key": config.DART_API_KEY, "rcept_no": rcept_no},
                          timeout=60)
         r.raise_for_status()
+        if not r.content.startswith(b"PK"):
+            m = re.search(rb"<message>([^<]*)</message>", r.content)
+            log.info("정기보고서 OpenAPI 원문 없음 rcept=%s: %s", rcept_no,
+                     m.group(1).decode("utf-8", "replace") if m else "ZIP 아님")
+            return None
         with zipfile.ZipFile(io.BytesIO(r.content)) as z:
             names = z.namelist()
             main = f"{rcept_no}.xml" if f"{rcept_no}.xml" in names else (names[0] if names else "")
             if not main:
                 return None
-            xml = z.read(main).decode("utf-8", errors="replace")
+            text = _clean_dart_xml(z.read(main).decode("utf-8", errors="replace"))
     except Exception as e:
-        log.warning("정기보고서 원문 fetch 실패 rcept=%s: %s", rcept_no, e)
+        log.warning("정기보고서 OpenAPI 원문 fetch 실패 rcept=%s: %s", rcept_no, e)
         return None
-    text = _clean_dart_xml(xml)
+    return text.strip() or None
+
+
+def _cut_section(text: str, start: re.Pattern, end: re.Pattern, max_chars: int) -> str | None:
+    """start~end 구간 평문. 목차가 본문 앞에 반복될 수 있어 시작 후보 중 가장 긴 구간을 택한다."""
     best = ""
-    for m in _BIZ_SECTION_START.finditer(text):
-        end = _BIZ_SECTION_END.search(text, m.end())
-        seg = text[m.start():end.start() if end else m.start() + max_chars]
+    for m in start.finditer(text):
+        e = end.search(text, m.end())
+        seg = text[m.start():e.start() if e else m.start() + max_chars]
         if len(seg) > len(best):
             best = seg
     if not best:
@@ -614,6 +703,39 @@ def fetch_business_section(rcept_no: str, max_chars: int = 30000) -> str | None:
     if len(best) > max_chars:
         best = best[:max_chars] + "\n…(이하 생략)"
     return best
+
+
+def fetch_business_section(rcept_no: str, ticker: str, name: str,
+                           max_chars: int = 30000) -> str | None:
+    """정기보고서 원문에서 'II. 사업의 내용' 구간만 평문으로 잘라 반환."""
+    text = download_periodic_report(rcept_no, ticker, name)
+    return _cut_section(text, _BIZ_SECTION_START, _BIZ_SECTION_END, max_chars) if text else None
+
+
+# 'III. 재무에 관한 사항' 중 1.요약재무정보 + 2.(연결)재무제표(재무상태표·손익·자본변동·현금흐름)까지.
+# 주석(3. 이후)은 방대해서 뺀다. fnlttSinglAcnt는 주요계정 몇 개뿐이라 분기(3개월) 순이익·
+# 금융손익·중단영업·현금흐름이 안 보인다 → 분기보고서가 나온 날 "순이익 미확인"이 됐다(2026-11-16 스피어).
+_FIN_SECTION_START = re.compile(r"(?m)^[ \t]*III\.\s*재무에\s*관한\s*사항[ \t]*$")  # 줄 머리 제목만 (본문 인용 제외)
+_FIN_SECTION_END = re.compile(r"\n\s*3\.\s*(?:연결\s*)?재무제표\s*주석")
+# 별도 본표 '4. 재무제표' ~ '5. 재무제표 주석'. 연결 대상이 없는 회사는 '2. 연결재무제표'가
+# "해당사항 없음"뿐이라 위 구간만으론 본표가 빠진다(2026-11-16 에스앤디).
+_SEP_SECTION_START = re.compile(r"(?m)^[ \t]*4\.\s*재무제표[ \t]*$")
+_SEP_SECTION_END = re.compile(r"\n\s*5\.\s*재무제표\s*주석")
+
+
+def fetch_financial_section(rcept_no: str, ticker: str, name: str,
+                            max_chars: int = 40000) -> str | None:
+    """정기보고서 원문에서 요약재무정보 + 연결 본표 + 별도 본표 구간만 평문으로 잘라 반환."""
+    text = download_periodic_report(rcept_no, ticker, name)
+    if not text:
+        return None
+    main = _cut_section(text, _FIN_SECTION_START, _FIN_SECTION_END, max_chars)
+    if not main:
+        return None
+    sep = _cut_section(text, _SEP_SECTION_START, _SEP_SECTION_END, max_chars)
+    if sep and sep not in main:
+        main = main + "\n" + sep
+    return main
 
 
 # ---------------------------------------------------------------------------
