@@ -99,6 +99,8 @@ class StockContext:
     business_overview: dict | None = None
     # 정기보고서 'III. 재무에 관한 사항' 원문 요약. agents.enrich_financial_statements가 채운다.
     report_financials: dict | None = None
+    # 네이버 분기 실적(3개월 단독) — QoQ 추이용. fetch_naver_quarterly 결과.
+    quarterly: dict | None = None
 
     def to_dict(self) -> dict:
         return {
@@ -112,6 +114,7 @@ class StockContext:
             "preferred_info": self.preferred_info,
             "business_overview": self.business_overview,
             "report_financials": self.report_financials,
+            "quarterly": self.quarterly,
         }
 
 
@@ -839,6 +842,52 @@ def _fetch_naver_integration(ticker: str) -> dict:
         return {}
 
 
+_QUARTER_ROWS = ("매출액", "영업이익", "당기순이익", "영업이익률")
+
+
+def fetch_naver_quarterly(ticker: str, n: int = 6) -> dict | None:
+    """네이버 모바일 분기 실적(3개월 단독, 억원·%). 실적 확정 컬럼만, 최근 n개 분기.
+    DART fnlttSinglAcnt는 누적치라 직전 분기 대비(QoQ)가 안 보인다(2026-11-16 에스앤디:
+    3Q가 매출·영업이익·순이익 모두 QoQ -12~-25%였는데 보고서는 YoY만 다뤘다).
+    네이버는 신규 분기 반영이 며칠 늦어 최신 분기가 비어 있을 수 있다 → 정기보고서 원문 '당기 3개월'로 보완.
+    반환: {'periods': ['2026.03.', ...], 'rows': {'매출액': {'2026.03.': '455', ...}, ...}}"""
+    try:
+        r = requests.get(f"https://m.stock.naver.com/api/stock/{ticker}/finance/quarter",
+                         headers=NAVER_HEADERS, timeout=10)
+        if r.status_code != 200:
+            return None
+        info = (r.json() or {}).get("financeInfo") or {}
+    except Exception as e:
+        log.warning("naver 분기 실적 fail %s: %s", ticker, e)
+        return None
+    rows_raw = {row.get("title"): row.get("columns") or {} for row in info.get("rowList") or []}
+    periods: list[tuple[str, str]] = []
+    for t in info.get("trTitleList") or []:
+        key, title = t.get("key"), t.get("title")
+        if t.get("isConsensus") == "Y":
+            continue   # 컨센서스(추정) 컬럼 제외
+        val = ((rows_raw.get("매출액") or {}).get(key) or {}).get("value")
+        if not val or val == "-":
+            continue   # 아직 반영 안 된 분기
+        periods.append((key, title))
+    periods = periods[-n:]
+    if not periods:
+        return None
+    rows = {name: {title: ((rows_raw.get(name) or {}).get(key) or {}).get("value") or "-"
+                   for key, title in periods}
+            for name in _QUARTER_ROWS if name in rows_raw}
+    return {"periods": [t for _, t in periods], "rows": rows}
+
+
+def format_quarterly_table(q: dict) -> str:
+    """fetch_naver_quarterly 결과 → 마크다운 표."""
+    ps = q["periods"]
+    out = ["| 항목 | " + " | ".join(ps) + " |", "|---|" + "---|" * len(ps)]
+    for name, cols in q["rows"].items():
+        out.append(f"| {name} | " + " | ".join(cols.get(p, "-") for p in ps) + " |")
+    return "\n".join(out)
+
+
 # totalInfos 의 key 한국어 → 영문 키 매핑
 _VALUATION_KEYS = {
     "시총": "market_cap", "PER": "per", "EPS": "eps", "추정PER": "fwd_per",
@@ -1023,6 +1072,7 @@ def load_context(ticker: str, years: int = 2,
     valuation = _parse_naver_valuation(nav)
     peers = _parse_naver_peers(nav, ticker)
     consensus = _parse_naver_consensus(nav)
+    quarterly = fetch_naver_quarterly(ticker)
     short_sale = _fetch_short_sale(ticker)
     market_snapshot = fetch_market_snapshot()
 
@@ -1059,6 +1109,7 @@ def load_context(ticker: str, years: int = 2,
         consensus=consensus, short_sale=short_sale,
         market_snapshot=market_snapshot,
         preferred_info=preferred_info,
+        quarterly=quarterly,
     )
 
 

@@ -26,7 +26,9 @@ from claude_agent_sdk import (
 )
 
 import config
+import data_loader
 import storage
+import ticker_archive
 
 log = logging.getLogger("report_chat")
 
@@ -48,6 +50,38 @@ def _load_system_prompt() -> str:
     return (config.PROMPTS_DIR / "report_chat.txt").read_text(encoding="utf-8")
 
 
+def _extra_data_blocks(report: dict) -> list[str]:
+    """보고서 본문에 다 안 들어간 원자료를 Q&A 컨텍스트에 덧붙인다.
+    - 정기보고서 재무제표 요약(분석 때 쓴 report_financials.json — 3개월·누적·현금흐름)
+    - 네이버 분기 실적(3개월 단독, 질문 시점 조회) — WebFetch는 finance.naver.com을 막아
+      "네이버 표와 비교해 달라"에 답하지 못했다(2026-11-16). 서버가 모바일 API로 대신 받는다.
+    실패해도 Q&A는 보고서만으로 진행한다."""
+    ticker, name = report.get("ticker", ""), report.get("name", "")
+    out: list[str] = []
+    try:
+        fin = ticker_archive.read_report_financials(ticker, name)
+        if fin.get("summary"):
+            out += [f"# 정기보고서 재무제표 요약 (DART {fin.get('report_nm','')} 원문, "
+                    f"접수 {fin.get('rcept_dt','')}, rcept_no={fin.get('rcept_no','')})",
+                    f"출처: {data_loader.dart_viewer_url(fin.get('rcept_no',''))}",
+                    fin["summary"], ""]
+    except Exception as e:
+        log.warning("Q&A 재무 요약 로드 실패 %s: %s", ticker, e)
+    try:
+        q = data_loader.fetch_naver_quarterly(ticker)
+        if q:
+            out += ["# 분기 실적 추이 (네이버증권 모바일 API, 3개월 단독, 억원·%, 질문 시점 조회)",
+                    f"출처: https://m.stock.naver.com/domestic/stock/{ticker}/finance/quarter",
+                    data_loader.format_quarterly_table(q),
+                    "_최신 분기가 비어 있으면 네이버 반영 지연이다 — 위 정기보고서 '당기 3개월' 값으로 채워 "
+                    "직전 분기 대비(QoQ)를 계산하라. QoQ는 전년 같은 구간(예: 작년 2Q→3Q)의 계절 흐름과 "
+                    "비교해 계절성인지 실제 후퇴인지 가려서 답한다. finance.naver.com 웹페이지는 WebFetch가 막혀 있으니 "
+                    "이 표를 네이버 데이터로 쓴다._", ""]
+    except Exception as e:
+        log.warning("Q&A 네이버 분기 실적 실패 %s: %s", ticker, e)
+    return out
+
+
 def _build_user_message(report: dict, report_md: str,
                         history: list[dict], question: str) -> str:
     """Claude에 넘길 단일 사용자 메시지. 컨텍스트 전체를 한 번에 패킹."""
@@ -60,6 +94,7 @@ def _build_user_message(report: dict, report_md: str,
     lines.append("# 기존 분석 보고서 (마크다운 원본)")
     lines.append(report_md or "(보고서 파일을 찾을 수 없음)")
     lines.append("")
+    lines.extend(_extra_data_blocks(report))
 
     if history:
         lines.append("# 이전 Q&A 이력 (시간순)")

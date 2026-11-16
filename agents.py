@@ -285,6 +285,14 @@ def _build_user_prompt(name: str, ticker: str, candidate: selector.Candidate,
             lines.append("_위 표는 공시 원문에서 뽑은 확정 수치다. 아래 '재무(API)' 표와 다르거나 거기 없는 "
                          "항목(분기 3개월 순이익·금융손익·현금흐름)은 이 원문을 우선하고, '미확인'으로 두지 말 것._")
             lines.append("")
+        if ctx.quarterly:
+            lines.append("## 분기 실적 추이 (네이버, 3개월 단독, 억원·%)")
+            lines.append(data_loader.format_quarterly_table(ctx.quarterly))
+            lines.append("_가장 최근 분기가 이 표에 없으면(네이버 반영 지연) 위 정기보고서 재무제표의 "
+                         "'당기 3개월' 값(백만원→억원)으로 이어 붙여라. 실적은 전년 동기 대비(YoY)와 "
+                         "직전 분기 대비(QoQ)를 둘 다 보되, QoQ는 전년 같은 구간의 계절 흐름과 비교해 "
+                         "계절성인지 실제 후퇴인지 가려서 해석한다._")
+            lines.append("")
         if ctx.financials:
             lines.append("## 재무 (API 주요계정, 백만원, 최신 보고서 우선)")
             for period, accs in ctx.financials.items():
