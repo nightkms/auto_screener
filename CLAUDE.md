@@ -82,8 +82,8 @@ trading.py      트레이더(Sonnet) 거래 제안 → 리스크 토론(공격·
         │
         ├──► storage.py     SQLite + analysis/auto/<주차>/*.md
         └──► notifier.py    텔레그램 2단계 푸시(요약 → 상세)
-                            (auto_hourly = 최종 결정 매수·매도만, 보유 생략. 결정 없으면
-                             예전 기준 STRONG 또는 1~2년 실적변화 이벤트, SKIP 제외)
+                            (auto_hourly = WATCH 이상 / 1~2년 실적변화 이벤트(SKIP 제외) /
+                             최종 결정 매수 중 하나면 전체, 그 외(매도·보유 등)는 1차 요약 1건만)
                             (auto_event  = 등급 무관 전송 — 급변 원인 자체가 알림 가치)
 ```
 

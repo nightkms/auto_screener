@@ -408,10 +408,13 @@ def build_single_messages(report_id: int,
 
     알림 정책 (source별):
     - 'manual' / 'telegram': 등급 무관 무조건 전송 (사용자가 직접 지정한 종목)
-    - 'auto_weekly' / 'auto_hourly': 포트폴리오 매니저 **최종 결정이 매수·매도**면 전송,
-      보유(HOLD)는 생략 (2026-10-19, TradingAgents 완전판 전환 — 등급 기준에서 변경).
-      최종 결정이 없으면(트레이딩 단계 실패·TRADING_ENABLED=0) 예전 등급 기준으로 폴백:
-      grade=='STRONG' 또는 실적변화 이벤트(earnings_event)가 있으면 전송, SKIP은 제외.
+    - 'auto_weekly' / 'auto_hourly': 아래 중 하나면 전송 (2026-11-16 사용자 룰):
+        ① 등급 WATCH 이상(WATCH·STRONG)
+        ② 1~2년 실적변화 이벤트(earnings_event) — 단 SKIP 등급은 제외
+        ③ 포트폴리오 매니저 최종 결정이 매수(BUY)
+      위 조건이면 요약→상세→최종 결정 전체를 보내고, 아니면(매도·보유·INTEREST·SKIP 등)
+      **1차 요약 1건만** 보낸다("이거 분석했어" 수준). 최종 결정이 없으면(트레이딩 실패·
+      TRADING_ENABLED=0) ①②만 본다.
     - 'auto_event' (급변 재분석): 등급 무관 전송. 애초에 "오늘 왜 튀었는지"를
       알려고 부른 종목이라 등급이 낮아도 그 답 자체가 알림 가치다. SKIP도 보낸다 —
       급변한 종목이 SKIP이면 '올랐지만 살 이유는 없다'가 곧 알고 싶던 결론이다.
@@ -426,22 +429,17 @@ def build_single_messages(report_id: int,
     # DB에 저장된 이벤트 노트엔 마크다운 잔재(백틱 등)가 섞여 있을 수 있다
     event_note = _clean((r.get("earnings_event") or "").strip(), 140)
     decision = (r.get("decision") or "").upper()
-    if source in ("auto_weekly", "auto_hourly") and decision:
-        if decision not in ("BUY", "SELL"):
-            log.info("[skip alert] report=%d %s decision=%s (%s는 매수·매도만 알림)",
-                     report_id, r.get("ticker"), decision, source)
-            return []
-    elif source in ("auto_weekly", "auto_hourly"):
+    brief_only = False
+    if source in ("auto_weekly", "auto_hourly"):
         grade = r.get("grade")
-        if grade == "SKIP":
-            log.info("[skip alert] report=%d %s grade=SKIP (%s는 SKIP 제외)",
-                     report_id, r.get("ticker"), source)
-            return []
-        if grade != "STRONG" and not event_note:
-            log.info("[skip alert] report=%d %s grade=%s (%s는 STRONG 또는 "
-                     "실적변화 이벤트만 알림)",
-                     report_id, r.get("ticker"), grade, source)
-            return []
+        if not (grade in ("WATCH", "STRONG")
+                or (event_note and grade != "SKIP")
+                or decision == "BUY"):
+            brief_only = True
+            log.info("[brief only] report=%d %s grade=%s decision=%s event=%s "
+                     "(%s 전체 알림은 WATCH+ / 실적변화 이벤트 / 매수만 → 1차 요약만)",
+                     report_id, r.get("ticker"), grade, decision or "-",
+                     "Y" if event_note else "N", source)
 
     emoji = EMOJI.get(r["grade"], "❓")
     src_tag = {
@@ -472,6 +470,8 @@ def build_single_messages(report_id: int,
     brief_body = (summarize_brief(md) or _strip_markdown(md)[:BRIEF_MAX]
                   ) if md else "(보고서 파일 없음)"
     detail_body = summarize_detail(md) if md else ""
+    if brief_only:   # 조건 미달 자동 분석: "이거 분석했어" 수준 — 1차 요약 1건만
+        return ["\n".join(head) + f"\n{'─' * 30}\n{brief_body}"]
     if detail_body or event_note:
         head.append("▼ 상세는 바로 다음 메시지 (필요 없으면 넘기세요)")
     brief = "\n".join(head) + f"\n{'─' * 30}\n{brief_body}"
