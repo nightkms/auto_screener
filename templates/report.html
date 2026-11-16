@@ -115,6 +115,14 @@
   .qa-role.assistant { color: var(--strong); }
   .qa-content { white-space: pre-wrap; word-break: break-word;
     font-size: var(--fs-body); line-height: 1.6; }
+  /* 답변(A)은 마크다운 렌더 — 위 .markdown 표·목록 스타일을 그대로 쓰고 좁은 패널에 맞게 조정 */
+  .qa-content.markdown { white-space: normal; line-height: 1.6; }
+  .qa-content.markdown > :last-child { margin-bottom: 0; }
+  .qa-content.markdown h1, .qa-content.markdown h2, .qa-content.markdown h3 {
+    font-size: 1.05em; border: 0; padding: 0; margin: 1em 0 .4em; }
+  .qa-content.markdown table { display: block; overflow-x: auto; margin: .6em 0; }
+  .qa-content.markdown th, .qa-content.markdown td { padding: 5px 8px; }
+  .qa-content.markdown td:first-child, .qa-content.markdown th:first-child { white-space: normal; }
   .qa-meta { font-size: 10px; color: var(--ink-muted); margin-top: 4px; }
   .qa-sources { margin-top: 6px; font-size: var(--fs-cap); }
   .qa-sources summary { cursor: pointer; color: var(--ink-muted); }
@@ -209,7 +217,7 @@
             {% for m in qa_history %}
               <div class="qa-msg {{ m.role }}">
                 <div class="qa-role {{ m.role }}">{{ 'Q' if m.role == 'user' else 'A' }} · {{ m.created_at }}</div>
-                <div class="qa-content">{{ m.content }}</div>
+                <div class="qa-content{{ ' qa-md' if m.role == 'assistant' else '' }}">{{ m.content }}</div>
                 {% if m.role == 'assistant' %}
                   <div class="qa-meta">
                     {% if m.tokens_in or m.tokens_out %}
@@ -276,6 +284,34 @@
   }
 })();
 
+// Q&A 답변 마크다운 렌더. 답변엔 웹 검색 내용이 섞일 수 있어 보고서 본문보다 엄격하게:
+// 원시 HTML은 글자로 보이게 escape, 링크는 http(s)만 살린다. 줄바꿈은 그대로(breaks).
+const qaMarked = window.marked ? (() => {
+  const esc = s => String(s).replace(/[&<>"']/g, c =>
+    ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+  const m = new marked.Marked({ gfm: true, breaks: true });
+  m.use({
+    tokenizer: { del() {} },   // "4~5월" 물결표 취소선 오인 방지 (본문과 동일)
+    renderer: {
+      html(token) { return esc(typeof token === 'string' ? token : token.text); },
+      link(href, title, text) {
+        if (href && typeof href === 'object') { title = href.title; text = href.text; href = href.href; }
+        if (!/^https?:\/\//i.test(href || '')) return text;
+        return `<a href="${esc(href)}" target="_blank" rel="noopener">${text}</a>`;
+      },
+    },
+  });
+  return m;
+})() : null;
+
+function renderQaMarkdown(el, text) {
+  if (!qaMarked) { el.textContent = text; return; }   // CDN 실패 시 기존 pre-wrap 원문
+  el.innerHTML = qaMarked.parse(text);
+  el.classList.add('markdown');
+}
+
+document.querySelectorAll('.qa-content.qa-md').forEach(el => renderQaMarkdown(el, el.textContent));
+
 // 탭 전환 (공시 / Q&A)
 function showTab(tab, btn) {
   const side = btn.closest('.side');
@@ -331,6 +367,7 @@ function showTab(tab, btn) {
       }
     }
     div.innerHTML = html;
+    if (role === 'assistant') renderQaMarkdown(div.querySelector('.qa-content'), content);
     history.appendChild(div);
     history.scrollTop = history.scrollHeight;
   }
