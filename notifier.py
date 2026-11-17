@@ -165,6 +165,9 @@ _BRIEF_SECTIONS = ("한 줄 요약", "영역별 매트릭스")
 _SKIP_SECTIONS = ("토론 전문",)
 # 포트폴리오 매니저 최종 결정은 3차 메시지로 따로 보낸다(2차 상세에서 제외).
 _DECISION_SECTION = "최종 결정"
+# 3차 메시지는 PM의 짧은 `📌 실행 요약`(비중·목표가·손절·타이밍·실행조건)만 보낸다.
+# 근거가 담긴 `✅ 최종 결정` 전문은 보고서·대시보드용. 요약이 없는 옛 보고서는 전문으로 폴백.
+_EXEC_SECTION = "실행 요약"
 
 # 매트릭스 영역명 축약 (부분 문자열 매칭)
 _AREA_SHORT = {
@@ -306,7 +309,7 @@ def summarize_detail(md: str, max_len: int = SUMMARY_MAX) -> str:
             continue                      # 1차와 중복
         if any(_norm(k) in _norm(title) for k in _SKIP_SECTIONS):
             continue
-        if _norm(_DECISION_SECTION) in _norm(title):
+        if any(_norm(k) in _norm(title) for k in (_DECISION_SECTION, _EXEC_SECTION)):
             continue                      # 3차 메시지
         body = _drop_tokens(body)
         if not body:
@@ -476,9 +479,18 @@ def build_single_messages(report_id: int,
         head.append("▼ 상세는 바로 다음 메시지 (필요 없으면 넘기세요)")
     brief = "\n".join(head) + f"\n{'─' * 30}\n{brief_body}"
     # 3차 — 포트폴리오 매니저 최종 결정 (있을 때만)
-    final_body = _drop_tokens(_sec(_sections(md), _DECISION_SECTION)) if md else ""
-    final = (f"{title} · 최종 결정\n{'─' * 30}\n{_strip_markdown(final_body)}"
-             if final_body else "")
+    secs = _sections(md) if md else {}
+    exec_body = _drop_tokens(_sec(secs, _EXEC_SECTION))
+    if exec_body:
+        # `결정:` 줄은 머리글로 올리고 본문에선 뺀다
+        lines = [ln.strip() for ln in _strip_markdown(exec_body).splitlines()
+                 if ln.strip() and not re.match(r"^[-•]?\s*결정\s*:", ln.strip())]
+        ko = {"BUY": "🟢 매수", "HOLD": "🟡 보유", "SELL": "🔴 매도"}.get(decision, decision)
+        final = f"{title} · 최종 결정: {ko or '—'}\n{'─' * 30}\n" + "\n".join(lines)
+    else:
+        final_body = _drop_tokens(_sec(secs, _DECISION_SECTION))
+        final = (f"{title} · 최종 결정\n{'─' * 30}\n{_strip_markdown(final_body)}"
+                 if final_body else "")
     if not (detail_body or event_note):
         return [brief] + ([final] if final else [])
 
