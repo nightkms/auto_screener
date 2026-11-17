@@ -23,6 +23,7 @@ from typing import Iterable
 import aiohttp
 
 import config
+import price_history
 
 log = logging.getLogger("selector")
 
@@ -168,6 +169,13 @@ async def _fetch_sise_movers(session: aiohttp.ClientSession, kind: str,
 async def _fetch_chart(session: aiohttp.ClientSession, code: str,
                        sem: asyncio.Semaphore,
                        start: str, end: str) -> tuple[str, list[dict]]:
+    """일봉(오름차순 무관). 최근 60거래일의 지난 봉 closePrice는 KRX 15:30 종가로 교정.
+
+    네이버 일봉 종가는 넥스트레이드 애프터마켓(~20:00) 마지막 체결가라 KRX 종가와
+    다르다 → price_history.krx_closes_from_price_rows 주석. 공통 기준(네이버 화면
+    등락률과 같음): 지난 거래일 = KRX 종가, 가장 최근 거래일 = 최신 체결가.
+    교정용 일별시세 조회가 실패하면 일봉 값을 그대로 돌려준다.
+    """
     url = (f"https://api.stock.naver.com/chart/domestic/item/{code}/day"
            f"?startDateTime={start}&endDateTime={end}")
     async with sem:
@@ -176,10 +184,26 @@ async def _fetch_chart(session: aiohttp.ClientSession, code: str,
                 if r.status != 200:
                     return code, []
                 rows = await r.json()
-                return code, rows if isinstance(rows, list) else []
         except Exception as e:                            # noqa
             log.warning("chart fail %s: %s", code, e)
             return code, []
+        if not isinstance(rows, list) or not rows:
+            return code, []
+        try:
+            async with session.get(
+                    price_history.NAVER_PRICE_URL.format(code=code),
+                    params={"pageSize": price_history.NAVER_PRICE_PAGE,
+                            "page": 1}) as r:
+                daily = await r.json(content_type=None) if r.status == 200 else []
+        except Exception as e:                            # noqa
+            log.warning("일별시세 fail %s (일봉 종가 그대로 사용): %s", code, e)
+            daily = []
+    krx = price_history.krx_closes_from_price_rows(
+        daily if isinstance(daily, list) else [])
+    if krx:
+        rows = [{**r, "closePrice": krx[str(r["localDate"])]}
+                if str(r.get("localDate")) in krx else r for r in rows]
+    return code, rows
 
 
 # ---------------------------------------------------------------------------

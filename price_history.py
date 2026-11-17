@@ -7,7 +7,10 @@ S9: 분석 후 성과 추적 — 분석일 기준 +1/3/6/12개월 주가 수익�
      - 액면분할은 야후 close가 이미 소급 반영하므로 우리가 비율을 곱할 필요 없다.
        events=split로 분할 구간을 감지해 배지만 표시(표시가격이 그날 본 값과 달라 보이는 이유 고지).
      - 한국 종목은 접미사 필요: 코스피 `.KS` / 코스닥 `.KQ`.
+     야후 close는 KRX 정규장 종가다(넥스트레이드 애프터마켓 미포함).
   2) 네이버 siseJson (fallback). 원종가(분할 미보정). 야후가 못 잡는 종목 보강용.
+     siseJson 종가는 NXT 마지막 체결가라 일별시세 역산 KRX 종가로 교정한다
+     (krx_closes_from_price_rows — selector·event_watch와 같은 기준).
 
 한 종목의 여러 분석 회차 각각에 대해 그 분석일 기준 성과를 따로 계산한다.
 시계열은 티커별로 TTL 캐시 → 같은 종목 다른 회차를 눌러도 재조회하지 않는다.
@@ -134,6 +137,70 @@ def _fetch_yahoo(ticker: str, market: str, start: date, end: date):
 
 
 # ---------------------------------------------------------------------------
+# KRX 종가 (네이버 일별시세 역산) — selector·event_watch·성과추적 공통 기준
+# ---------------------------------------------------------------------------
+# 넥스트레이드(NXT) 출범 후 네이버 일봉(chart API·siseJson)의 '종가'는 NXT
+# 애프터마켓(~20:00) 마지막 체결가다. KRX 정규장(15:30) 종가가 아니다.
+#   예) 에스앤디 2026-11-16 KRX 종가 58,000원 / 일봉 종가 53,800원(19:59 NXT)
+# 반면 일별시세의 compareToPreviousClosePrice(전일대비)는 **KRX 전일 종가** 기준이라
+#   KRX종가(d-1) = closePrice(d) − 전일대비(d)
+# 로 매일의 KRX 종가를 되살릴 수 있다(야후 .KQ/.KS 종가와 일치 확인).
+#
+# 공통 기준 = 네이버 화면 등락률과 같은 방식:
+#   · 지난 거래일 → KRX 15:30 종가
+#   · 가장 최근 거래일(당일) → 최신 체결가(NXT 포함)
+# 그래서 당일 등락률 = 최신가 ÷ KRX 전일 종가. 전일 15:30 이후 NXT 거래·밤사이
+# 뉴스(월요일이면 금요일 15:30 이후 + 주말 전체)가 전부 당일 변동에 들어간다.
+NAVER_PRICE_URL = "https://m.stock.naver.com/api/stock/{code}/price"
+NAVER_PRICE_PAGE = 60          # pageSize 상한(100은 400 에러). 1페이지 ≈ 3개월
+
+
+def _num(s) -> float | None:
+    try:
+        return float(str(s).replace(",", ""))
+    except (TypeError, ValueError):
+        return None
+
+
+def krx_closes_from_price_rows(rows: list[dict]) -> dict[str, float]:
+    """일별시세 행(최신순) → {YYYYMMDD: KRX 종가}. 가장 오래된 행의 전일까지 나온다.
+
+    가장 최근 거래일 자신의 KRX 종가는 여기서 나오지 않는다(다음 날 행이 없으므로).
+    → 당일은 최신 체결가를 그대로 쓰는 공통 기준과 맞아떨어진다.
+    """
+    rows = sorted(rows, key=lambda r: str(r.get("localTradedAt") or ""))
+    out: dict[str, float] = {}
+    for prev, cur in zip(rows, rows[1:]):
+        c, chg = _num(cur.get("closePrice")), _num(cur.get("compareToPreviousClosePrice"))
+        if c is None or chg is None:
+            continue
+        out[str(prev.get("localTradedAt") or "").replace("-", "")] = c - chg
+    return out
+
+
+def fetch_krx_closes(code: str, pages: int = 1) -> dict[str, float]:
+    """동기 버전. 일별시세 pages쪽(1쪽=60거래일) → {YYYYMMDD: KRX 종가}. 실패 시 빈 dict."""
+    rows: list[dict] = []
+    for page in range(1, pages + 1):
+        try:
+            r = requests.get(NAVER_PRICE_URL.format(code=code),
+                             params={"pageSize": NAVER_PRICE_PAGE, "page": page},
+                             headers=_HEADERS, timeout=15)
+            if r.status_code != 200:
+                break
+            got = r.json()
+        except Exception as e:
+            log.warning("naver 일별시세 fail %s p%d: %s", code, page, e)
+            break
+        if not isinstance(got, list) or not got:
+            break
+        rows.extend(got)
+        if len(got) < NAVER_PRICE_PAGE:
+            break
+    return krx_closes_from_price_rows(rows)
+
+
+# ---------------------------------------------------------------------------
 # 네이버 siseJson (fallback)
 # ---------------------------------------------------------------------------
 # 행 예: ["20260601", 53800, 57500, 50700, 54000, 50842, 5.94]
@@ -160,6 +227,13 @@ def _fetch_naver(ticker: str, start: date, end: date):
             series[date(int(ymd[:4]), int(ymd[4:6]), int(ymd[6:8]))] = float(m.group(5))
         if not series:
             return None
+        # siseJson 종가는 NXT 마지막 체결가 → 지난 거래일은 KRX 종가로 교정.
+        # 1쪽=60거래일이라 필요한 기간만큼만 넘긴다(상한 25쪽 ≈ 6년).
+        pages = min(25, (end - start).days // 85 + 1)
+        for ymd, krx in fetch_krx_closes(ticker, pages).items():
+            d = date(int(ymd[:4]), int(ymd[4:6]), int(ymd[6:8]))
+            if d in series:
+                series[d] = krx
         return series, [], "naver"
     except Exception as e:
         log.warning("naver siseJson fail %s: %s", ticker, e)

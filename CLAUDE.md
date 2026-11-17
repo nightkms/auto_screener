@@ -189,7 +189,8 @@ keepalive로 **못 막는** 만료도 있다: Claude Code는 토큰 유효기간
 - selector와 **반대 방향**이다: selector는 안 본 종목을 찾고(dedup 적용), event_watch는
   이미 본 종목 중 오늘 급변한 것을 찾는다(dedup 무시).
 - 트리거는 **당일성 지표만** — 당일 등락률 +15%(급등), 52주 신고가. 거래량 배수는 쓰지 않는다.
-  급락은 기본 off(`EVENT_PLUNGE=0`) — 토큰은 급등과 같이 쓰는데 그날 되짚을 실익이 적다(2026-09-06).
+  급락은 코드 기본 off(`EVENT_PLUNGE=0`) — 토큰은 급등과 같이 쓰는데 그날 되짚을 실익이 적다(2026-09-06).
+  하락장이라 운영 `.env`에선 2026-11-17부터 `EVENT_PLUNGE=1`로 켜 둠.
   '분석일 대비 누적 이탈'·'52주 신저가'는 실측 후 제외(전자는 당일성 없음, 후자는 하락장에
   하루 40~86건 동반 발생). 임계는 `config.EVENT_*`로만 조정하고 코드에 하드코딩 금지.
 - **쿨다운·하루 상한 없음**(사용자 룰). 중복 제거는 두 가지뿐:
@@ -234,6 +235,10 @@ keepalive로 **못 막는** 만료도 있다: Claude Code는 토큰 유효기간
 - `scheduler.py`는 최상단에서 `import _silence_console`(Windows 콘솔 억제, 비Windows는 no-op).
   이 파일은 추적 대상이며 **삭제·ignore 금지** — 없으면 import 에러.
 - 네이버 검색/시세는 **비공식** 엔드포인트라 변경될 수 있다(`selector.py`/`data_loader.py` 조정 여지).
+- 네이버 일봉(chart API·siseJson)의 '종가'는 **넥스트레이드 애프터마켓(~20:00) 마지막 체결가**지 KRX 종가가 아니다.
+  공통 기준(네이버 화면 등락률과 같음) = 지난 거래일은 KRX 15:30 종가, 당일은 최신 체결가.
+  KRX 종가는 일별시세 `closePrice − 전일대비`로 역산 → `price_history.krx_closes_from_price_rows`.
+  `selector._fetch_chart`(event_watch도 사용)·성과추적 네이버 폴백이 이걸로 교정한다(2026-11-17).
 - DART 단일계정 API는 일부 종목 당기순이익이 누락될 수 있다.
 - Windows에서 `pythonw` + VBS redirect 조합이 sleep/wake 후 로그를 0바이트로 남기는 경우가 있다.
 - `data/`·`logs/`·`.venv/`·`.env`는 gitignore 대상. 클론 직후엔 비어 있고 첫 실행 시 생성된다.
